@@ -593,14 +593,34 @@ def fuzzy_find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
 
 
 def _parse_numeric(val) -> float | None:
-    """Strip currency symbols, spaces, commas and parse as float."""
+    """Strip currency/space/comma, parse as float. For currency columns."""
     try:
         cleaned = str(val).replace("US$", "").replace("$", "").replace("%", "")
-        cleaned = cleaned.replace(",", ".").replace(" ", "").strip()
-        result = float(cleaned)
-        return result
+        cleaned = cleaned.replace(",", ".").replace("\xa0", "").replace(" ", "").strip()
+        return float(cleaned)
     except (ValueError, TypeError):
         return None
+
+
+def _parse_pct(val) -> float | None:
+    """Parse a percentage that may be stored as:
+    - Excel internal decimal: 0.0057 -> 0.57  (Excel stores 0.57% as 0.0057)
+    - String with % sign   : "0,57%" -> 0.57
+    - String without %     : "0.57"  -> 0.57  (assume already in % units)
+    Rule: if raw value has no % AND parsed float < 1.0, multiply x100.
+    """
+    raw_str = str(val)
+    has_pct = "%" in raw_str
+    try:
+        cleaned = raw_str.replace("US$","").replace("$","").replace("%","")
+        cleaned = cleaned.replace(",",".").replace("\xa0","").replace(" ","").strip()
+        num = float(cleaned)
+        if not has_pct and num < 1.0:
+            return round(num * 100, 4)
+        return num
+    except (ValueError, TypeError):
+        return None
+
 
 
 def normalize_hourly(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -661,9 +681,11 @@ def normalize_hourly(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         gt_rows = df_renamed[hour_is_text & has_total_text]
         if not gt_rows.empty:
             gt_row = gt_rows.iloc[0]
+            _pct_cols = {"cr", "ctr"}
             for col in ["spend", "cpm", "cpc", "ctr", "cac", "cr", "subs"]:
                 if col in gt_row.index:
-                    val = _parse_numeric(gt_row[col])
+                    parser = _parse_pct if col in _pct_cols else _parse_numeric
+                    val = parser(gt_row[col])
                     if val is not None:
                         grand_total[col] = val
 
@@ -673,9 +695,11 @@ def normalize_hourly(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         df_renamed["hour"] = pd.to_numeric(df_renamed["hour"]).astype(int)
 
     # ── Coerce numeric cols ────────────────────────────────────────────────
+    _pct_cols = {"cr", "ctr"}
     for col in ["spend", "cpm", "cpc", "ctr", "cac", "cr", "subs"]:
         if col in df_renamed.columns:
-            df_renamed[col] = df_renamed[col].apply(_parse_numeric)
+            parser = _parse_pct if col in _pct_cols else _parse_numeric
+            df_renamed[col] = df_renamed[col].apply(parser)
 
     return df_renamed, grand_total
 

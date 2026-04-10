@@ -592,8 +592,23 @@ def fuzzy_find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
-def normalize_hourly(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardize hourly dataframe column names."""
+def _parse_numeric(val) -> float | None:
+    """Strip currency symbols, spaces, commas and parse as float."""
+    try:
+        cleaned = str(val).replace("US$", "").replace("$", "").replace("%", "")
+        cleaned = cleaned.replace(",", ".").replace(" ", "").strip()
+        result = float(cleaned)
+        return result
+    except (ValueError, TypeError):
+        return None
+
+
+def normalize_hourly(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Standardize hourly dataframe column names.
+    
+    Returns (hourly_df, grand_total) where grand_total is a dict
+    with values read directly from the Grand Total row — no calculations.
+    """
     renames = {}
 
     hour_col = fuzzy_find_col(df, ["event hour", "hour", "time", "hour of day"])
@@ -628,22 +643,41 @@ def normalize_hourly(df: pd.DataFrame) -> pd.DataFrame:
     if subs_col:
         renames[subs_col] = "subs"
 
-    df = df.rename(columns=renames)
+    df_renamed = df.rename(columns=renames)
 
-    # Drop summary/total rows
-    if "hour" in df.columns:
-        df = df[pd.to_numeric(df["hour"], errors="coerce").notna()].copy()
-        df["hour"] = pd.to_numeric(df["hour"]).astype(int)
+    # ── Extract Grand Total row BEFORE dropping it ─────────────────────────
+    # Grand Total row = the row where the hour column is non-numeric
+    # (contains text like "Grand Total") AND the row contains "total" somewhere.
+    grand_total: dict = {}
+    if "hour" in df_renamed.columns:
+        hour_is_text = pd.to_numeric(
+            df_renamed["hour"].astype(str)
+                .str.replace(r"[US$\s,.]", "", regex=True),
+            errors="coerce",
+        ).isna()
+        has_total_text = df_renamed.apply(
+            lambda row: row.astype(str).str.lower().str.contains("total").any(), axis=1
+        )
+        gt_rows = df_renamed[hour_is_text & has_total_text]
+        if not gt_rows.empty:
+            gt_row = gt_rows.iloc[0]
+            for col in ["spend", "cpm", "cpc", "ctr", "cac", "cr", "subs"]:
+                if col in gt_row.index:
+                    val = _parse_numeric(gt_row[col])
+                    if val is not None:
+                        grand_total[col] = val
 
-    # Coerce numeric cols
+    # ── Drop summary/total rows (keep only numeric hour rows) ──────────────
+    if "hour" in df_renamed.columns:
+        df_renamed = df_renamed[pd.to_numeric(df_renamed["hour"], errors="coerce").notna()].copy()
+        df_renamed["hour"] = pd.to_numeric(df_renamed["hour"]).astype(int)
+
+    # ── Coerce numeric cols ────────────────────────────────────────────────
     for col in ["spend", "cpm", "cpc", "ctr", "cac", "cr", "subs"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(r"[$,%]", "", regex=True).str.strip(),
-                errors="coerce"
-            )
+        if col in df_renamed.columns:
+            df_renamed[col] = df_renamed[col].apply(_parse_numeric)
 
-    return df
+    return df_renamed, grand_total
 
 
 def normalize_geo(df: pd.DataFrame) -> pd.DataFrame:
@@ -1178,7 +1212,10 @@ with col_u2:
 using_demo = False
 if hourly_file:
     raw_hourly = read_uploaded_file(hourly_file)
-    hourly_df  = normalize_hourly(raw_hourly) if raw_hourly is not None else DEMO_HOURLY.copy()
+    if raw_hourly is not None:
+        hourly_df, hourly_grand_total = normalize_hourly(raw_hourly)
+    else:
+        hourly_df, hourly_grand_total = DEMO_HOURLY.copy(), {}
 else:
     hourly_df  = DEMO_HOURLY.copy()
     using_demo = True
@@ -1199,41 +1236,24 @@ if using_demo:
 # ─────────────────────────────────────────────
 st.markdown("<p class='section-header'>📊 Performance Summary</p>", unsafe_allow_html=True)
 
-total_spend  = hourly_df["spend"].sum()  if "spend"  in hourly_df.columns else 0
-total_subs   = hourly_df["subs"].sum()   if "subs"   in hourly_df.columns else 0
-avg_cac      = hourly_df["cac"].mean()   if "cac"    in hourly_df.columns else 0
-avg_cpm      = hourly_df["cpm"].mean()   if "cpm"    in hourly_df.columns else 0
+# ── All KPI values come directly from the Grand Total row ────────────────────
+# No calculations — these are the platform's own aggregated figures.
+# Fall back to sum/demo values only if Grand Total row was absent.
 
-# CR: prefer the Grand Total row from the raw upload (weighted avg);
-# fall back to spend-weighted mean of hourly rows so it's never a simple
-# unweighted mean which would overweight low-spend hours.
-def _weighted_cr(df: pd.DataFrame) -> float:
-    """Spend-weighted CR across hourly rows."""
-    if "cr" not in df.columns or "spend" not in df.columns:
-        return 0.0
-    valid = df[df["spend"] > 0].copy()
-    if valid.empty:
-        return 0.0
-    total_w = valid["spend"].sum()
-    return (valid["cr"] * valid["spend"]).sum() / total_w if total_w else 0.0
+def _gt(key, fallback):
+    """Read a value from hourly_grand_total, else use fallback."""
+    return hourly_grand_total.get(key, fallback)
 
-# Try to find Grand Total row in the raw upload (before normalization dropped it)
-_gt_cr = None
-if "raw_hourly" in dir() and raw_hourly is not None:
-    _gt_rows = raw_hourly[
-        raw_hourly.apply(lambda r: r.astype(str).str.lower().str.contains("grand total|total").any(), axis=1)
-    ]
-    if not _gt_rows.empty:
-        # find the CR column
-        _cr_col = fuzzy_find_col(raw_hourly, ["cr to subs", "cr_to_subs", "cr to sub", "conversion rate", "cr"])
-        if _cr_col:
-            _val = pd.to_numeric(
-                str(_gt_rows.iloc[0][_cr_col]).replace("%","").strip(), errors="coerce"
-            )
-            if pd.notna(_val):
-                _gt_cr = _val
+total_spend = _gt("spend", hourly_df["spend"].sum()  if "spend" in hourly_df.columns else 0)
+total_subs  = _gt("subs",  hourly_df["subs"].sum()   if "subs"  in hourly_df.columns else 0)
+avg_cac     = _gt("cac",   0)
+avg_cpm     = _gt("cpm",   0)
+avg_cr      = _gt("cr",    0)
+avg_cpc     = _gt("cpc",   0)
+avg_ctr     = _gt("ctr",   0)
 
-avg_cr = _gt_cr if _gt_cr is not None else _weighted_cr(hourly_df)
+# Flag whether Grand Total values are genuine (for card subtitle)
+_from_gt = bool(hourly_grand_total)
 
 # Best hour
 if "cac" in hourly_df.columns and not hourly_df.empty:
@@ -1255,9 +1275,9 @@ c1, c2, c3, c4, c5, c6 = st.columns(6)
 cards = [
     (c1, "Total Spend",   f"${total_spend:,.0f}",    None, None),
     (c2, "Total Subs",    f"{int(total_subs)}",       None, None),
-    (c3, "Avg CAC",       f"${avg_cac:.2f}",          f"Best: ${best_cac:.0f} @ H{best_hour}", "delta-good"),
-    (c4, "Avg CPM",       f"${avg_cpm:.2f}",          None, None),
-    (c5, "CR (Weighted)", f"{avg_cr:.2f}%",           "Spend-weighted / Grand Total", "delta-neutral"),
+    (c3, "CAC (Grand Total)",  f"${avg_cac:.2f}",  f"Best: ${best_cac:.0f} @ H{best_hour}", "delta-good"),
+    (c4, "CPM (Grand Total)",  f"${avg_cpm:.2f}",  "From Grand Total row" if _from_gt else "Calculated", "delta-neutral"),
+    (c5, "CR (Grand Total)",   f"{avg_cr:.2f}%",   "From Grand Total row" if _from_gt else "Calculated", "delta-neutral"),
     (c6, "Last 3h Trend", f"{trend_pct:+.1f}%",       trend_dir, trend_class),
 ]
 for col, label, val, delta, delta_class in cards:

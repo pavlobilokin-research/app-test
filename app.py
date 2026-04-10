@@ -1233,26 +1233,48 @@ with col_u2:
 # ─────────────────────────────────────────────
 #  DATA LOADING
 # ─────────────────────────────────────────────
-using_demo = False
-if hourly_file:
-    raw_hourly = read_uploaded_file(hourly_file)
-    if raw_hourly is not None:
-        hourly_df, hourly_grand_total = normalize_hourly(raw_hourly)
-    else:
-        hourly_df, hourly_grand_total = DEMO_HOURLY.copy(), {}
-else:
-    hourly_df  = DEMO_HOURLY.copy()
-    using_demo = True
+both_uploaded = hourly_file is not None and geo_file is not None
 
-if geo_file:
-    raw_geo    = read_uploaded_file(geo_file)
-    geo_df     = normalize_geo(raw_geo) if raw_geo is not None else DEMO_GEO.copy()
-else:
-    geo_df     = DEMO_GEO.copy()
-    using_demo = True
+if not both_uploaded:
+    missing = []
+    if not hourly_file:
+        missing.append("📁 **Hourly Report**")
+    if not geo_file:
+        missing.append("📁 **GEO Report**")
+    missing_str = "&nbsp;&nbsp;·&nbsp;&nbsp;".join(missing)
+    st.markdown(f"""
+    <div style="
+        background:#F0EAE1;border:2px dashed #DDD5CC;border-radius:20px;
+        padding:3rem 2rem;text-align:center;margin-top:1.5rem
+    ">
+      <div style="font-size:2.5rem;margin-bottom:0.8rem">📊</div>
+      <div style="font-size:1.1rem;font-weight:700;color:#3B2F25;margin-bottom:0.5rem">
+        Upload both files to load the dashboard
+      </div>
+      <div style="font-size:0.88rem;color:#8B7355;margin-bottom:1.2rem">
+        {missing_str} still needed
+      </div>
+      <div style="font-size:0.78rem;color:#8B7355;opacity:0.8">
+        All analysis, charts, and signals will appear once both files are uploaded.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
 
-if using_demo:
-    st.info("⚡ Running on **demo data** (04/10/2026 snapshot). Upload your files above to analyze live campaigns.", icon="📊")
+# Both files present — load data
+raw_hourly = read_uploaded_file(hourly_file)
+if raw_hourly is not None:
+    hourly_df, hourly_grand_total = normalize_hourly(raw_hourly)
+else:
+    st.error("Could not read the Hourly Report. Please check the format and re-upload.")
+    st.stop()
+
+raw_geo = read_uploaded_file(geo_file)
+if raw_geo is not None:
+    geo_df = normalize_geo(raw_geo)
+else:
+    st.error("Could not read the GEO Report. Please check the format and re-upload.")
+    st.stop()
 
 
 # ─────────────────────────────────────────────

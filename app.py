@@ -978,7 +978,12 @@ def chart_hourly_spend(hourly_df: pd.DataFrame) -> go.Figure:
 
 
 def chart_geo_cac_bubble(geo_df: pd.DataFrame) -> go.Figure:
-    """Bubble chart: x=CAC, y=ROI, size=Spend, colored by action."""
+    """Bubble chart: x=CAC, y=ROI (%), size=Spend, colored by action.
+    
+    ROI values are stored as plain percentages (e.g. 44.42 = 44.42%).
+    We filter out sentinel/placeholder _cac values (9999) and _roi (-9999)
+    so the axis stays meaningful.
+    """
     action_colors = {
         "SCALE":  PALETTE["green"],
         "WATCH":  PALETTE["amber"],
@@ -987,29 +992,48 @@ def chart_geo_cac_bubble(geo_df: pd.DataFrame) -> go.Figure:
     }
     action_order = ["SCALE", "WATCH", "OK", "REDUCE"]
 
+    # Strip rows with sentinel values (no real CAC or ROI data)
+    plot_df = geo_df[(geo_df["_cac"] < 9000) & (geo_df["_roi"] > -9000)].copy()
+
+    if plot_df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No data with valid CAC & ROI to display.",
+                           xref="paper", yref="paper", x=0.5, y=0.5,
+                           showarrow=False, font=dict(color=PALETTE["tan"]))
+        fig.update_layout(paper_bgcolor=PALETTE["bg"], plot_bgcolor=PALETTE["bg"],
+                          height=300, margin=dict(l=10,r=10,t=10,b=10))
+        return fig
+
+    # Compute clean axis ranges with padding
+    cac_max = plot_df["_cac"].max()
+    roi_min = plot_df["_roi"].min()
+    roi_max = plot_df["_roi"].max()
+    cac_pad = max(cac_max * 0.15, 20)
+    roi_pad = max(abs(roi_max - roi_min) * 0.15, 10)
+
     fig = go.Figure()
     for action in action_order:
-        sub = geo_df[geo_df["Action"] == action]
+        sub = plot_df[plot_df["Action"] == action]
         if sub.empty:
             continue
         fig.add_trace(go.Scatter(
             x=sub["_cac"],
-            y=sub["_roi"],
+            y=sub["_roi"],          # already in % (e.g. 44.42 = 44.42%)
             mode="markers+text",
             text=sub["Country"],
             textposition="top center",
-            textfont=dict(size=9),
+            textfont=dict(size=9, color=PALETTE["brown"]),
             name=action,
             marker=dict(
-                size=sub["_spend"].clip(lower=50).apply(lambda s: max(12, min(50, s / 25))),
+                size=sub["_spend"].clip(lower=30).apply(lambda s: max(14, min(55, s / 20))),
                 color=action_colors[action],
-                line=dict(width=1, color="white"),
-                opacity=0.85,
+                line=dict(width=1.5, color="white"),
+                opacity=0.88,
             ),
             hovertemplate=(
                 "<b>%{text}</b><br>"
                 "CAC: $%{x:.0f}<br>"
-                "ROI: %{y:+.0f}%<br>"
+                "ROI: %{y:+.1f}%<br>"
                 "<extra></extra>"
             ),
         ))
@@ -1018,12 +1042,26 @@ def chart_geo_cac_bubble(geo_df: pd.DataFrame) -> go.Figure:
         paper_bgcolor=PALETTE["bg"],
         plot_bgcolor=PALETTE["bg"],
         font=dict(family="DM Sans", color=PALETTE["brown"]),
-        height=380,
-        margin=dict(l=10, r=10, t=10, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(title="CAC ($)", gridcolor=PALETTE["border"], zeroline=False),
-        yaxis=dict(title="ROI (%)", gridcolor=PALETTE["border"], zeroline=True,
-                   zerolinecolor=PALETTE["border"]),
+        height=420,
+        margin=dict(l=10, r=10, t=20, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    font=dict(size=11)),
+        xaxis=dict(
+            title="CAC ($)",
+            gridcolor=PALETTE["border"],
+            zeroline=False,
+            range=[-cac_pad, cac_max + cac_pad],
+            tickprefix="$",
+        ),
+        yaxis=dict(
+            title="ROI (%)",
+            gridcolor=PALETTE["border"],
+            zeroline=True,
+            zerolinecolor="#C8BEB4",
+            zerolinewidth=1.5,
+            range=[roi_min - roi_pad, roi_max + roi_pad],
+            ticksuffix="%",
+        ),
         hovermode="closest",
     )
     return fig
@@ -1165,7 +1203,37 @@ total_spend  = hourly_df["spend"].sum()  if "spend"  in hourly_df.columns else 0
 total_subs   = hourly_df["subs"].sum()   if "subs"   in hourly_df.columns else 0
 avg_cac      = hourly_df["cac"].mean()   if "cac"    in hourly_df.columns else 0
 avg_cpm      = hourly_df["cpm"].mean()   if "cpm"    in hourly_df.columns else 0
-avg_cr       = hourly_df["cr"].mean()    if "cr"     in hourly_df.columns else 0
+
+# CR: prefer the Grand Total row from the raw upload (weighted avg);
+# fall back to spend-weighted mean of hourly rows so it's never a simple
+# unweighted mean which would overweight low-spend hours.
+def _weighted_cr(df: pd.DataFrame) -> float:
+    """Spend-weighted CR across hourly rows."""
+    if "cr" not in df.columns or "spend" not in df.columns:
+        return 0.0
+    valid = df[df["spend"] > 0].copy()
+    if valid.empty:
+        return 0.0
+    total_w = valid["spend"].sum()
+    return (valid["cr"] * valid["spend"]).sum() / total_w if total_w else 0.0
+
+# Try to find Grand Total row in the raw upload (before normalization dropped it)
+_gt_cr = None
+if "raw_hourly" in dir() and raw_hourly is not None:
+    _gt_rows = raw_hourly[
+        raw_hourly.apply(lambda r: r.astype(str).str.lower().str.contains("grand total|total").any(), axis=1)
+    ]
+    if not _gt_rows.empty:
+        # find the CR column
+        _cr_col = fuzzy_find_col(raw_hourly, ["cr to subs", "cr_to_subs", "cr to sub", "conversion rate", "cr"])
+        if _cr_col:
+            _val = pd.to_numeric(
+                str(_gt_rows.iloc[0][_cr_col]).replace("%","").strip(), errors="coerce"
+            )
+            if pd.notna(_val):
+                _gt_cr = _val
+
+avg_cr = _gt_cr if _gt_cr is not None else _weighted_cr(hourly_df)
 
 # Best hour
 if "cac" in hourly_df.columns and not hourly_df.empty:
@@ -1189,7 +1257,7 @@ cards = [
     (c2, "Total Subs",    f"{int(total_subs)}",       None, None),
     (c3, "Avg CAC",       f"${avg_cac:.2f}",          f"Best: ${best_cac:.0f} @ H{best_hour}", "delta-good"),
     (c4, "Avg CPM",       f"${avg_cpm:.2f}",          None, None),
-    (c5, "Avg CR",        f"{avg_cr:.2f}%",           None, None),
+    (c5, "CR (Weighted)", f"{avg_cr:.2f}%",           "Spend-weighted / Grand Total", "delta-neutral"),
     (c6, "Last 3h Trend", f"{trend_pct:+.1f}%",       trend_dir, trend_class),
 ]
 for col, label, val, delta, delta_class in cards:
@@ -1302,59 +1370,206 @@ with tab3:
 
 
 # ─────────────────────────────────────────────
-#  STRATEGIC INSIGHTS
+#  STRATEGIC INSIGHTS — VERDICT ENGINE
 # ─────────────────────────────────────────────
-st.markdown("<p class='section-header'>💡 Strategic Insights</p>", unsafe_allow_html=True)
+st.markdown("<p class='section-header'>💡 Strategic Insights & Verdict</p>", unsafe_allow_html=True)
 
-# Auto-generate insights
-insights = []
+# ── Individual signal bullets ──────────────────
+bullets = []
 
-# 1. Best hour insight
-if "cac" in hourly_df.columns:
+# 1. Best hour
+if "cac" in hourly_df.columns and not hourly_df.empty:
     bh = hourly_df.loc[hourly_df["cac"].idxmin()]
-    insights.append(
+    bullets.append(
         f"⭐ <b>Star Hour H{int(bh['hour'])}</b>: CAC <b>${bh['cac']:.0f}</b> — "
-        f"<b>{((avg_cac - bh['cac'])/avg_cac*100):.0f}%</b> below daily average. "
-        f"Ensure budget is not exhausted before this window."
+        f"<b>{((avg_cac - bh['cac'])/avg_cac*100):.0f}%</b> below daily avg. "
+        f"Protect budget availability for this window."
     )
 
 # 2. Worst hour
-if "cac" in hourly_df.columns:
+if "cac" in hourly_df.columns and not hourly_df.empty:
     wh = hourly_df.loc[hourly_df["cac"].idxmax()]
-    insights.append(
+    bullets.append(
         f"🔴 <b>Waste Alert H{int(wh['hour'])}</b>: CAC <b>${wh['cac']:.0f}</b> "
         f"({((wh['cac'] - avg_cac)/avg_cac*100):.0f}% above avg) on ${wh['spend']:.0f} spend. "
-        f"Implement dayparting or bid caps for this slot."
+        f"Apply dayparting or bid caps to this slot."
     )
 
-# 3. Scale target
+# 3. Top SCALE GEO
+reduce_df = signal_df[signal_df["Action"] == "REDUCE"].sort_values("_spend", ascending=False)
 if not scale_df.empty:
     top = scale_df.iloc[0]
-    insights.append(
-        f"🚀 <b>Scale Now → {top['Country']}</b>: ROI {top['ROI']} with CAC {top['CAC']}. "
-        f"Currently in {top['Window']}. Shift budget from underperforming GEOs immediately."
+    bullets.append(
+        f"🚀 <b>Scale → {top['Country']}</b>: ROI {top['ROI']} · CAC {top['CAC']} · {top['Window']}. "
+        f"Shift freed budget here immediately."
     )
 
-# 4. Reduce target
-reduce_df = signal_df[signal_df["Action"] == "REDUCE"].sort_values("_spend", ascending=False)
+# 4. Top REDUCE GEO
 if not reduce_df.empty:
     top_r = reduce_df.iloc[0]
-    insights.append(
-        f"🛑 <b>Cut Spend → {top_r['Country']}</b>: {top_r['Reason']} "
-        f"Reallocate freed budget to scaling GEOs."
+    bullets.append(
+        f"🛑 <b>Cut → {top_r['Country']}</b>: {top_r['Reason']}"
     )
 
-# 5. CPM watch
-high_cpm = signal_df[signal_df["Action"] == "WATCH"].head(2)
+# 5. Creative fatigue
+high_cpm = signal_df[signal_df["Action"] == "WATCH"]
 if not high_cpm.empty:
     countries = ", ".join(high_cpm["Country"].tolist())
-    insights.append(
-        f"⚠️ <b>Creative Fatigue Risk</b> in {countries}: CPM above $6. "
-        f"Refresh creatives and test new angles for these markets."
+    bullets.append(
+        f"⚠️ <b>Creative Fatigue Risk</b> — {countries}: CPM above $6. Refresh ad creatives."
     )
 
-for ins in insights:
-    st.markdown(f"<div class='insight-box'>{ins}</div>", unsafe_allow_html=True)
+# 6. CAC trend
+if "cac" in hourly_df.columns and len(hourly_df) >= 3:
+    bullets.append(
+        f"📊 <b>Last-3h CAC Trend</b>: {trend_pct:+.1f}% vs daily avg "
+        f"({'improving ✅' if trend_pct < 0 else 'worsening ❌'})."
+    )
+
+for b in bullets:
+    st.markdown(f"<div class='insight-box'>{b}</div>", unsafe_allow_html=True)
+
+# ── VERDICT ENGINE ─────────────────────────────
+# Score: +/- points weighted by signal importance
+# Positive = bullish (scale), Negative = bearish (reduce)
+score = 0
+score_notes = []
+
+# Signal weights
+W_CAC_TREND   = 3   # high weight — recent momentum
+W_SCALE_GEOS  = 2   # per golden-window SCALE GEO
+W_REDUCE_GEOS = 2   # per REDUCE GEO (negative)
+W_WATCH_GEOS  = 1   # mild drag
+W_CAC_LEVEL   = 2   # overall CAC vs benchmark
+W_CR_LEVEL    = 1   # CR signal
+
+BLENDED_CAC_BENCHMARK = 80  # $ — adjust to your target CPA
+
+# 1. CAC trend (most recent signal)
+if trend_pct < -10:
+    score += W_CAC_TREND * 2
+    score_notes.append(f"+{W_CAC_TREND*2} CAC trend strongly improving ({trend_pct:+.1f}%)")
+elif trend_pct < 0:
+    score += W_CAC_TREND
+    score_notes.append(f"+{W_CAC_TREND} CAC trend improving ({trend_pct:+.1f}%)")
+elif trend_pct > 20:
+    score -= W_CAC_TREND * 2
+    score_notes.append(f"-{W_CAC_TREND*2} CAC trend sharply worsening ({trend_pct:+.1f}%)")
+else:
+    score -= W_CAC_TREND
+    score_notes.append(f"-{W_CAC_TREND} CAC trend worsening ({trend_pct:+.1f}%)")
+
+# 2. Blended CAC vs benchmark
+if avg_cac < BLENDED_CAC_BENCHMARK * 0.8:
+    score += W_CAC_LEVEL * 2
+    score_notes.append(f"+{W_CAC_LEVEL*2} Avg CAC ${avg_cac:.0f} well below benchmark ${BLENDED_CAC_BENCHMARK}")
+elif avg_cac < BLENDED_CAC_BENCHMARK:
+    score += W_CAC_LEVEL
+    score_notes.append(f"+{W_CAC_LEVEL} Avg CAC ${avg_cac:.0f} below benchmark")
+elif avg_cac < BLENDED_CAC_BENCHMARK * 1.25:
+    score -= W_CAC_LEVEL
+    score_notes.append(f"-{W_CAC_LEVEL} Avg CAC ${avg_cac:.0f} above benchmark")
+else:
+    score -= W_CAC_LEVEL * 2
+    score_notes.append(f"-{W_CAC_LEVEL*2} Avg CAC ${avg_cac:.0f} significantly above benchmark")
+
+# 3. SCALE GEOs in golden window
+golden_scales = signal_df[
+    (signal_df["Action"] == "SCALE") & (signal_df["Window"].str.contains("Golden", na=False))
+]
+n_golden = len(golden_scales)
+if n_golden > 0:
+    pts = min(n_golden * W_SCALE_GEOS, 8)
+    score += pts
+    score_notes.append(f"+{pts} {n_golden} GEOs in active golden window with SCALE signal")
+
+# 4. REDUCE GEOs
+n_reduce = len(reduce_df)
+if n_reduce > 0:
+    pts = min(n_reduce * W_REDUCE_GEOS, 6)
+    score -= pts
+    score_notes.append(f"-{pts} {n_reduce} GEOs flagged REDUCE (waste detected)")
+
+# 5. WATCH GEOs (mild drag)
+n_watch = len(signal_df[signal_df["Action"] == "WATCH"])
+if n_watch > 0:
+    score -= n_watch * W_WATCH_GEOS
+    score_notes.append(f"-{n_watch * W_WATCH_GEOS} {n_watch} GEOs with high CPM / fatigue risk")
+
+# 6. CR signal
+if avg_cr > 0.8:
+    score += W_CR_LEVEL
+    score_notes.append(f"+{W_CR_LEVEL} CR {avg_cr:.2f}% above 0.8% threshold")
+elif avg_cr < 0.4:
+    score -= W_CR_LEVEL
+    score_notes.append(f"-{W_CR_LEVEL} CR {avg_cr:.2f}% below 0.4% — funnel underperforming")
+
+# ── Verdict ──
+if score >= 6:
+    verdict_emoji = "🟢"
+    verdict_label = "SCALE UP"
+    verdict_color = "#2A7A4B"
+    verdict_bg    = "#D6F0E0"
+    verdict_text  = (
+        f"Signals are strongly bullish. Multiple GEOs are in golden windows with efficient CAC, "
+        f"and the recent trend is improving. This is the time to increase daily budgets by <b>20–40%</b>, "
+        f"prioritise the top SCALE GEOs, and reallocate spend away from REDUCE markets."
+    )
+elif score >= 2:
+    verdict_emoji = "🟡"
+    verdict_label = "HOLD & OPTIMISE"
+    verdict_color = "#7A5A00"
+    verdict_bg    = "#FFF3CD"
+    verdict_text  = (
+        f"Mixed signals. Some markets are performing well but waste exists elsewhere. "
+        f"Do <b>not</b> increase total budget — instead redistribute: cut REDUCE GEOs, "
+        f"push more to SCALE GEOs, and apply dayparting to the worst-performing hours."
+    )
+elif score >= -2:
+    verdict_emoji = "🟠"
+    verdict_label = "CAUTION — HOLD"
+    verdict_color = "#8B4000"
+    verdict_bg    = "#FFE9CC"
+    verdict_text  = (
+        f"Signals are slightly bearish. CAC is elevated or trending up. "
+        f"Freeze any budget increases. Prioritise creative refresh and bid cap implementation "
+        f"before considering any scale. Monitor for 24h before re-evaluating."
+    )
+else:
+    verdict_emoji = "🔴"
+    verdict_label = "SCALE DOWN"
+    verdict_color = "#8B1A1A"
+    verdict_bg    = "#FFE0E0"
+    verdict_text  = (
+        f"Multiple bearish signals. Wasted spend is material, CAC is above benchmark, "
+        f"and the trend is deteriorating. <b>Reduce total budget by 20–30%</b>, pause REDUCE GEOs, "
+        f"implement strict dayparting, and audit creatives for fatigue before any re-scale."
+    )
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown(f"""
+<div style="background:{verdict_bg};border:2px solid {verdict_color};border-radius:20px;padding:1.5rem 2rem;margin-top:0.5rem">
+  <div style="display:flex;align-items:center;gap:0.8rem;margin-bottom:0.8rem">
+    <span style="font-size:1.8rem">{verdict_emoji}</span>
+    <div>
+      <div style="font-size:0.65rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{verdict_color};opacity:0.8">Overall Verdict</div>
+      <div style="font-size:1.6rem;font-weight:800;color:{verdict_color};line-height:1">{verdict_label}</div>
+    </div>
+    <div style="margin-left:auto;background:{verdict_color};color:white;border-radius:999px;padding:0.3rem 1rem;font-size:0.85rem;font-weight:700">
+      Score: {score:+d}
+    </div>
+  </div>
+  <div style="font-size:0.9rem;color:{verdict_color};line-height:1.6;margin-bottom:1rem">{verdict_text}</div>
+  <details>
+    <summary style="font-size:0.72rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:{verdict_color};opacity:0.7;cursor:pointer">
+      Score breakdown ({len(score_notes)} signals)
+    </summary>
+    <div style="margin-top:0.6rem">
+      {"".join(f'<div style="font-size:0.78rem;color:{verdict_color};padding:0.15rem 0;opacity:0.85">· {n}</div>' for n in score_notes)}
+    </div>
+  </details>
+</div>
+""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 #  FOOTER

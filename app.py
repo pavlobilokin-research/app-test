@@ -1233,409 +1233,768 @@ with col_u2:
 # ─────────────────────────────────────────────
 #  DATA LOADING
 # ─────────────────────────────────────────────
-both_uploaded = hourly_file is not None and geo_file is not None
+# Non-blocking data load — Tab 1 always works, tabs 2-5 check for data
+_files_ready = False
+hourly_df = None
+hourly_grand_total = {}
+geo_df = None
 
-if not both_uploaded:
+if hourly_file:
+    _raw_hourly = read_uploaded_file(hourly_file)
+    if _raw_hourly is not None:
+        hourly_df, hourly_grand_total = normalize_hourly(_raw_hourly)
+
+if geo_file:
+    _raw_geo = read_uploaded_file(geo_file)
+    if _raw_geo is not None:
+        geo_df = normalize_geo(_raw_geo)
+
+_files_ready = (hourly_df is not None and geo_df is not None)
+
+
+
+# ─────────────────────────────────────────────
+#  UPLOAD GATE HELPER (used inside each performance tab)
+# ─────────────────────────────────────────────
+def _upload_gate_inline():
     missing = []
-    if not hourly_file:
-        missing.append("📁 **Hourly Report**")
-    if not geo_file:
-        missing.append("📁 **GEO Report**")
-    missing_str = "&nbsp;&nbsp;·&nbsp;&nbsp;".join(missing)
+    if not hourly_file: missing.append("📁 Hourly Report")
+    if not geo_file:    missing.append("📁 GEO Report")
+    missing_str = " &amp; ".join(missing)
     st.markdown(f"""
-    <div style="
-        background:#F0EAE1;border:2px dashed #DDD5CC;border-radius:20px;
-        padding:3rem 2rem;text-align:center;margin-top:1.5rem
-    ">
-      <div style="font-size:2.5rem;margin-bottom:0.8rem">📊</div>
-      <div style="font-size:1.1rem;font-weight:700;color:#3B2F25;margin-bottom:0.5rem">
-        Upload both files to load the dashboard
+    <div style="background:#F0EAE1;border:2px dashed #DDD5CC;border-radius:20px;
+         padding:2.5rem 2rem;text-align:center;margin-top:1rem">
+      <div style="font-size:2rem;margin-bottom:0.6rem">📊</div>
+      <div style="font-size:1rem;font-weight:700;color:#3B2F25;margin-bottom:0.4rem">
+        Upload both files to view this tab
       </div>
-      <div style="font-size:0.88rem;color:#8B7355;margin-bottom:1.2rem">
-        {missing_str} still needed
-      </div>
-      <div style="font-size:0.78rem;color:#8B7355;opacity:0.8">
-        All analysis, charts, and signals will appear once both files are uploaded.
+      <div style="font-size:0.85rem;color:#8B7355">
+        {missing_str} needed — use the uploaders at the top of the page
       </div>
     </div>
     """, unsafe_allow_html=True)
-    st.stop()
-
-# Both files present — load data
-raw_hourly = read_uploaded_file(hourly_file)
-if raw_hourly is not None:
-    hourly_df, hourly_grand_total = normalize_hourly(raw_hourly)
-else:
-    st.error("Could not read the Hourly Report. Please check the format and re-upload.")
-    st.stop()
-
-raw_geo = read_uploaded_file(geo_file)
-if raw_geo is not None:
-    geo_df = normalize_geo(raw_geo)
-else:
-    st.error("Could not read the GEO Report. Please check the format and re-upload.")
-    st.stop()
-
 
 # ─────────────────────────────────────────────
-#  KPI SUMMARY CARDS
+#  MAIN TABS
 # ─────────────────────────────────────────────
-st.markdown("<p class='section-header'>📊 Performance Summary</p>", unsafe_allow_html=True)
-
-# ── All KPI values come directly from the Grand Total row ────────────────────
-# No calculations — these are the platform's own aggregated figures.
-# Fall back to sum/demo values only if Grand Total row was absent.
-
-def _gt(key, fallback):
-    """Read a value from hourly_grand_total, else use fallback."""
-    return hourly_grand_total.get(key, fallback)
-
-total_spend = _gt("spend", hourly_df["spend"].sum()  if "spend" in hourly_df.columns else 0)
-total_subs  = _gt("subs",  hourly_df["subs"].sum()   if "subs"  in hourly_df.columns else 0)
-avg_cac     = _gt("cac",   0)
-avg_cpm     = _gt("cpm",   0)
-avg_cr      = _gt("cr",    0)
-avg_cpc     = _gt("cpc",   0)
-avg_ctr     = _gt("ctr",   0)
-
-# Flag whether Grand Total values are genuine (for card subtitle)
-_from_gt = bool(hourly_grand_total)
-
-# Best hour
-if "cac" in hourly_df.columns and not hourly_df.empty:
-    best_row   = hourly_df.loc[hourly_df["cac"].idxmin()]
-    best_hour  = int(best_row["hour"])
-    best_cac   = best_row["cac"]
-else:
-    best_hour  = 0
-    best_cac   = 0
-
-# Last 3 hours trend
-last3 = hourly_df.tail(3)
-last3_avg_cac = last3["cac"].mean() if "cac" in last3.columns else 0
-trend_pct     = ((last3_avg_cac - avg_cac) / avg_cac * 100) if avg_cac else 0
-trend_dir     = "📉 Improving" if trend_pct < 0 else "📈 Worsening"
-trend_class   = "delta-good"  if trend_pct < 0 else "delta-bad"
-
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-cards = [
-    (c1, "Total Spend",   f"${total_spend:,.0f}",    None, None),
-    (c2, "Total Subs",    f"{int(total_subs)}",       None, None),
-    (c3, "CAC (Grand Total)",  f"${avg_cac:.2f}",  f"Best: ${best_cac:.0f} @ H{best_hour}", "delta-good"),
-    (c4, "CPM (Grand Total)",  f"${avg_cpm:.2f}",  "From Grand Total row" if _from_gt else "Calculated", "delta-neutral"),
-    (c5, "CR (Grand Total)",   f"{avg_cr:.2f}%",   "From Grand Total row" if _from_gt else "Calculated", "delta-neutral"),
-    (c6, "Last 3h Trend", f"{trend_pct:+.1f}%",       trend_dir, trend_class),
-]
-for col, label, val, delta, delta_class in cards:
-    with col:
-        delta_html = f"<div class='delta {delta_class}'>{delta}</div>" if delta else ""
-        st.markdown(f"""
-        <div class='metric-card'>
-          <div class='label'>{label}</div>
-          <div class='value'>{val}</div>
-          {delta_html}
-        </div>""", unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
+main_tab1, main_tab2, main_tab3, main_tab4, main_tab5 = st.tabs([
+    "🌍 World Clock & Holidays",
+    "📊 Performance Summary",
+    "📈 Hourly Analysis",
+    "🎯 GEO Signals",
+    "💡 Strategic Verdict",
+])
 
 
-# ─────────────────────────────────────────────
-#  COMPUTE SIGNALS
-# ─────────────────────────────────────────────
-signal_df = compute_signals(geo_df, hourly_df)
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 1 — WORLD CLOCK & HOLIDAYS
+# ══════════════════════════════════════════════════════════════════════════════
+with main_tab1:
 
+    now_utc_wc = datetime.now(pytz.utc)
 
-# ─────────────────────────────────────────────
-#  CURRENT OPPORTUNITY CARD
-# ─────────────────────────────────────────────
-scale_df = signal_df[signal_df["Action"] == "SCALE"].sort_values("_roi", ascending=False)
-if not scale_df.empty:
-    best_opp = scale_df.iloc[0]
-    st.markdown(f"""
-    <div class='opp-card'>
-      <div class='opp-title'>🚀 Current Best Opportunity</div>
-      <div class='opp-country'>{best_opp["Country"]}</div>
-      <div class='opp-sub'>{best_opp["Window"]} · Local time {best_opp["Local Time"]} · CAC {best_opp["CAC"]}</div>
-      <div class='opp-roi'>{best_opp["ROI"]} ROI</div>
-      <div class='opp-sub' style='margin-top:0.5rem;font-size:0.8rem;opacity:0.7'>{best_opp["Reason"]}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── Holiday engine ────────────────────────────────────────────────────────
+    import holidays as hol_lib
+
+    COUNTRY_ISO = {
+        "United States":        "US",
+        "United Arab Emirates": "AE",
+        "Austria":              "AT",
+        "Australia":            "AU",
+        "Belgium":              "BE",
+        "Bulgaria":             "BG",
+        "Canada":               "CA",
+        "Switzerland":          "CH",
+        "Chile":                "CL",
+        "Colombia":             "CO",
+        "Costa Rica":           "CR",
+        "Czech Republic":       "CZ",
+        "Germany":              "DE",
+        "Denmark":              "DK",
+        "Dominican Republic":   "DO",
+        "Ecuador":              "EC",
+        "Estonia":              "EE",
+        "Spain":                "ES",
+        "Finland":              "FI",
+        "France":               "FR",
+        "United Kingdom":       "GB",
+        "Greece":               "GR",
+        "Croatia":              "HR",
+        "Hungary":              "HU",
+        "Indonesia":            "ID",
+        "Ireland":              "IE",
+        "Israel":               "IL",
+        "Italy":                "IT",
+        "Jordan":               "JO",
+        "South Korea":          "KR",
+        "Kuwait":               "KW",
+        "Lithuania":            "LT",
+        "Latvia":               "LV",
+        "Morocco":              "MA",
+        "Mexico":               "MX",
+        "Malaysia":             "MY",
+        "Netherlands":          "NL",
+        "New Zealand":          "NZ",
+        "Oman":                 "OM",
+        "Panama":               "PA",
+        "Poland":               "PL",
+        "Portugal":             "PT",
+        "Qatar":                "QA",
+        "Romania":              "RO",
+        "Serbia":               "RS",
+        "Saudi Arabia":         "SA",
+        "Singapore":            "SG",
+        "Slovenia":             "SI",
+        "Slovakia":             "SK",
+        "Sweden":               "SE",
+        "Thailand":             "TH",
+        "Turkey":               "TR",
+        "Taiwan":               "TW",
+        "South Africa":         "ZA",
+    }
+
+    COUNTRY_FLAG = {
+        "United States":"🇺🇸","United Arab Emirates":"🇦🇪","Austria":"🇦🇹",
+        "Australia":"🇦🇺","Belgium":"🇧🇪","Bulgaria":"🇧🇬","Canada":"🇨🇦",
+        "Switzerland":"🇨🇭","Chile":"🇨🇱","Colombia":"🇨🇴","Costa Rica":"🇨🇷",
+        "Czech Republic":"🇨🇿","Germany":"🇩🇪","Denmark":"🇩🇰",
+        "Dominican Republic":"🇩🇴","Ecuador":"🇪🇨","Estonia":"🇪🇪",
+        "Spain":"🇪🇸","Finland":"🇫🇮","France":"🇫🇷","United Kingdom":"🇬🇧",
+        "Greece":"🇬🇷","Croatia":"🇭🇷","Hungary":"🇭🇺","Indonesia":"🇮🇩",
+        "Ireland":"🇮🇪","Israel":"🇮🇱","Italy":"🇮🇹","Jordan":"🇯🇴",
+        "South Korea":"🇰🇷","Kuwait":"🇰🇼","Lithuania":"🇱🇹","Latvia":"🇱🇻",
+        "Morocco":"🇲🇦","Mexico":"🇲🇽","Malaysia":"🇲🇾","Netherlands":"🇳🇱",
+        "New Zealand":"🇳🇿","Oman":"🇴🇲","Panama":"🇵🇦","Poland":"🇵🇱",
+        "Portugal":"🇵🇹","Qatar":"🇶🇦","Romania":"🇷🇴","Serbia":"🇷🇸",
+        "Saudi Arabia":"🇸🇦","Singapore":"🇸🇬","Slovenia":"🇸🇮","Slovakia":"🇸🇰",
+        "Sweden":"🇸🇪","Thailand":"🇹🇭","Turkey":"🇹🇷","Taiwan":"🇹🇼",
+        "South Africa":"🇿🇦",
+    }
+
+    US_STATES = [
+        ("New York",       "America/New_York",      "ET"),
+        ("Chicago",        "America/Chicago",        "CT"),
+        ("Denver",         "America/Denver",         "MT"),
+        ("Los Angeles",    "America/Los_Angeles",    "PT"),
+        ("Phoenix",        "America/Phoenix",        "AZ"),
+        ("Anchorage",      "America/Anchorage",      "AK"),
+        ("Honolulu",       "Pacific/Honolulu",       "HI"),
+    ]
+
+    US_STATE_ISO = {
+        "New York":    "NY",
+        "Chicago":     "IL",
+        "Denver":      "CO",
+        "Los Angeles": "CA",
+        "Phoenix":     "AZ",
+        "Anchorage":   "AK",
+        "Honolulu":    "HI",
+    }
+
+    def get_holidays_for_year(iso2: str, year: int) -> dict:
+        """Return {date: name} dict for a country/year, always in English."""
+        try:
+            h = hol_lib.country_holidays(iso2, years=year)
+            # Use English if the country supports it
+            try:
+                if "en_US" in h.supported_languages:
+                    h = hol_lib.country_holidays(iso2, years=year, language="en_US")
+            except Exception:
+                pass
+            return dict(h)
+        except Exception:
+            return {}
+
+    def get_us_state_holidays(state_iso: str, year: int) -> dict:
+        try:
+            return dict(hol_lib.US(state=state_iso, years=year))
+        except Exception:
+            return {}
+
+    today = now_utc_wc.date()
+    cur_year  = today.year
+    next_year = cur_year + 1
+
+    def upcoming_holidays(iso2: str, n: int = 3, state_iso: str = None) -> list[tuple]:
+        """Return up to n upcoming holidays as (date, name) sorted by date."""
+        combined = {}
+        for yr in [cur_year, next_year]:
+            if state_iso:
+                combined.update(get_us_state_holidays(state_iso, yr))
+            else:
+                combined.update(get_holidays_for_year(iso2, yr))
+        future = sorted(
+            [(d, name) for d, name in combined.items() if d >= today],
+            key=lambda x: x[0]
+        )
+        return future[:n]
+
+    def today_holiday(iso2: str, state_iso: str = None) -> str | None:
+        h = get_holidays_for_year(iso2, cur_year)
+        if state_iso:
+            h.update(get_us_state_holidays(state_iso, cur_year))
+        return h.get(today)
+
+    def window_label(local_hour: int) -> tuple[str, str]:
+        """Return (window_name, bg_color) for a local hour."""
+        if 8 <= local_hour <= 11:
+            return "🌅 Morning Peak", "#FFF8E6"
+        if 19 <= local_hour <= 23:
+            return "🌙 Evening Peak", "#EEF0FF"
+        if 1 <= local_hour <= 5:
+            return "💤 Dead Zone", "#F0EAE1"
+        return "🕐 Normal", "#FFFFFF"
+
+    # ── Search + filter ───────────────────────────────────────────────────────
+    wc_col1, wc_col2, wc_col3 = st.columns([3, 2, 2])
+    with wc_col1:
+        search_q = st.text_input("🔍 Search country", placeholder="e.g. Germany, Singapore…", label_visibility="collapsed")
+    with wc_col2:
+        window_filter = st.selectbox("Filter by window", ["All Windows", "Morning Peak", "Evening Peak", "Dead Zone", "Normal"], label_visibility="collapsed")
+    with wc_col3:
+        holiday_only = st.checkbox("🎉 Show holidays only (today)", value=False)
+
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # ── Build rows ────────────────────────────────────────────────────────────
+    def build_clock_rows():
+        rows = []
 
-# ─────────────────────────────────────────────
-#  CHARTS ROW
-# ─────────────────────────────────────────────
-st.markdown("<p class='section-header'>📈 Hourly Performance</p>", unsafe_allow_html=True)
+        # ── USA first — country row then each state ──────────────────────────
+        us_iso  = "US"
+        us_flag = "🇺🇸"
+        us_fed_hol = today_holiday(us_iso)
 
-chart_col1, chart_col2 = st.columns([3, 2])
-with chart_col1:
-    st.caption("CAC vs Conversions by Hour")
-    st.plotly_chart(chart_hourly_cac_subs(hourly_df), use_container_width=True, config={"displayModeBar": False})
-with chart_col2:
-    st.caption("Spend by Hour (🟢 Efficient · 🟡 Normal · 🔴 Costly)")
-    st.plotly_chart(chart_hourly_spend(hourly_df), use_container_width=True, config={"displayModeBar": False})
+        # country-level (ET as representative)
+        et_tz    = pytz.timezone("America/New_York")
+        et_local = now_utc_wc.astimezone(et_tz)
+        et_h     = et_local.hour
+        win_label, win_bg = window_label(et_h)
+        rows.append({
+            "flag": us_flag,
+            "country": "United States",
+            "detail": "Federal",
+            "tz_str": "Multiple",
+            "local_time": "—",
+            "local_hour": et_h,
+            "window": win_label,
+            "win_bg": win_bg,
+            "today_hol": us_fed_hol or "",
+            "upcoming": upcoming_holidays(us_iso, n=3),
+            "is_state": False,
+            "is_country_header": True,
+        })
+
+        for state_name, tz_str, tz_code in US_STATES:
+            state_iso = US_STATE_ISO[state_name]
+            tz_obj    = pytz.timezone(tz_str)
+            local_dt  = now_utc_wc.astimezone(tz_obj)
+            lh        = local_dt.hour
+            wl, wb    = window_label(lh)
+            state_hol = today_holiday(us_iso, state_iso=state_iso)
+            rows.append({
+                "flag": "  ",
+                "country": f"  {state_name}",
+                "detail": tz_code,
+                "tz_str": tz_str,
+                "local_time": local_dt.strftime("%H:%M"),
+                "local_hour": lh,
+                "window": wl,
+                "win_bg": wb,
+                "today_hol": state_hol or "",
+                "upcoming": upcoming_holidays(us_iso, n=2, state_iso=state_iso),
+                "is_state": True,
+                "is_country_header": False,
+            })
+
+        # ── All other countries alphabetically ───────────────────────────────
+        for country in sorted(COUNTRY_ISO.keys()):
+            iso2   = COUNTRY_ISO[country]
+            flag   = COUNTRY_FLAG.get(country, "")
+            tz_name = _resolve_tz(country)
+            if not tz_name:
+                continue
+            tz_obj   = pytz.timezone(tz_name)
+            local_dt = now_utc_wc.astimezone(tz_obj)
+            lh       = local_dt.hour
+            wl, wb   = window_label(lh)
+            t_hol    = today_holiday(iso2)
+            rows.append({
+                "flag": flag,
+                "country": country,
+                "detail": tz_obj.zone,
+                "tz_str": tz_name,
+                "local_time": local_dt.strftime("%H:%M"),
+                "local_hour": lh,
+                "window": wl,
+                "win_bg": wb,
+                "today_hol": t_hol or "",
+                "upcoming": upcoming_holidays(iso2, n=3),
+                "is_state": False,
+                "is_country_header": False,
+            })
+        return rows
+
+    all_rows = build_clock_rows()
+
+    # Apply filters
+    filtered = all_rows
+    if search_q:
+        q = search_q.lower()
+        filtered = [r for r in filtered if q in r["country"].lower()]
+    if window_filter != "All Windows":
+        filtered = [r for r in filtered if window_filter in r["window"]]
+    if holiday_only:
+        filtered = [r for r in filtered if r["today_hol"]]
+
+    # ── Render cards ─────────────────────────────────────────────────────────
+    COLS = 3
+    col_groups = [filtered[i:i+COLS] for i in range(0, len(filtered), COLS)]
+
+    def render_upcoming(upcoming_list):
+        if not upcoming_list:
+            return "<span style='color:#8B7355;font-size:0.72rem'>No upcoming holidays found</span>"
+        parts = []
+        for d, name in upcoming_list:
+            days_away = (d - today).days
+            if days_away == 0:
+                label = "<b style='color:#E05252'>TODAY</b>"
+            elif days_away == 1:
+                label = "<b style='color:#F0A500'>Tomorrow</b>"
+            elif days_away <= 7:
+                label = f"<b style='color:#4CAF72'>in {days_away}d</b>"
+            else:
+                label = f"in {days_away}d"
+            parts.append(
+                f"<div style='padding:0.12rem 0;border-bottom:1px solid #EDE6DC;font-size:0.74rem'>"
+                f"<span style='color:#8B7355'>{d.strftime('%b %d')}</span> "
+                f"<span style='color:#3B2F25'>{name}</span> "
+                f"<span style='color:#8B7355'>{label}</span></div>"
+            )
+        return "".join(parts)
+
+    if not filtered:
+        st.markdown(
+            "<div style='text-align:center;color:#8B7355;padding:3rem'>No countries match your filter.</div>",
+            unsafe_allow_html=True
+        )
+    else:
+        for row_group in col_groups:
+            cols = st.columns(COLS)
+            for col_obj, row in zip(cols, row_group):
+                with col_obj:
+                    if row["is_country_header"]:
+                        # Country header — darker style
+                        st.markdown(f"""
+                        <div style="background:#3B2F25;border-radius:16px;padding:1rem 1.2rem;margin-bottom:0.6rem">
+                          <div style="display:flex;justify-content:space-between;align-items:center">
+                            <span style="font-size:1.2rem">{row['flag']}</span>
+                            <span style="font-size:0.65rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#DDD5CC">{row['country']}</span>
+                            <span style="font-size:0.7rem;color:#8B7355">{row['detail']}</span>
+                          </div>
+                          {'<div style="margin-top:0.5rem;background:#4CAF72;border-radius:8px;padding:0.2rem 0.5rem;font-size:0.7rem;color:white;font-weight:700">🎉 ' + row["today_hol"] + '</div>' if row["today_hol"] else ""}
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        hol_badge = ""
+                        if row["today_hol"]:
+                            hol_badge = f"<div style='margin-top:0.4rem;background:#4CAF72;border-radius:8px;padding:0.15rem 0.5rem;font-size:0.68rem;color:white;font-weight:700;display:inline-block'>🎉 {row['today_hol']}</div>"
+
+                        indent = "padding-left:1.2rem;border-left:3px solid #DDD5CC;" if row["is_state"] else ""
+                        upcoming_html = render_upcoming(row["upcoming"])
+
+                        st.markdown(f"""
+                        <div style="background:{row['win_bg']};border:1px solid #DDD5CC;border-radius:16px;padding:0.9rem 1.1rem;margin-bottom:0.6rem;{indent}">
+                          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem">
+                            <div>
+                              <span style="font-size:1rem">{row['flag']}</span>
+                              <span style="font-weight:700;font-size:0.88rem;color:#3B2F25;margin-left:0.3rem">{row['country'].strip()}</span>
+                              <span style="font-size:0.68rem;color:#8B7355;margin-left:0.3rem">{row['detail'].split('/')[-1] if '/' in row['detail'] else row['detail']}</span>
+                            </div>
+                            <div style="text-align:right">
+                              <div style="font-size:1.35rem;font-weight:700;color:#3B2F25;line-height:1">{row['local_time']}</div>
+                              <div style="font-size:0.65rem;color:#8B7355">{row['window']}</div>
+                            </div>
+                          </div>
+                          {hol_badge}
+                          <div style="margin-top:0.5rem">{upcoming_html}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+    # ── Holiday legend ────────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="background:#F0EAE1;border-radius:12px;padding:0.7rem 1rem;font-size:0.72rem;color:#8B7355;display:flex;gap:1.5rem;flex-wrap:wrap">
+      <b>Window legend:</b>
+      <span style="background:#FFF8E6;padding:0.15rem 0.5rem;border-radius:6px">🌅 Morning Peak 08–11</span>
+      <span style="background:#EEF0FF;padding:0.15rem 0.5rem;border-radius:6px">🌙 Evening Peak 19–23</span>
+      <span style="background:#F0EAE1;padding:0.15rem 0.5rem;border-radius:6px">💤 Dead Zone 01–05</span>
+      <span style="padding:0.15rem 0.5rem;border-radius:6px">🕐 Normal hours</span>
+      <span style="background:#4CAF72;color:white;padding:0.15rem 0.5rem;border-radius:6px">🎉 Public holiday today</span>
+    </div>
+    """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────
-#  GEO BUBBLE CHART + SIGNAL TABLE TABS
-# ─────────────────────────────────────────────
-st.markdown("<p class='section-header'>🌍 GEO Intelligence</p>", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+#  TABS 2–5 — PERFORMANCE DASHBOARD (requires files)
+# ══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3 = st.tabs(["🎯 Signal Table", "🫧 CAC vs ROI Map", "📋 Raw Data"])
+# ── File uploads (shown in all performance tabs via sidebar-style placement) ──
+with main_tab2:
+    _show_upload = not (hourly_file and geo_file)
 
-with tab1:
-    # Counts
-    n_scale  = (signal_df["Action"] == "SCALE").sum()
-    n_watch  = (signal_df["Action"] == "WATCH").sum()
-    n_reduce = (signal_df["Action"] == "REDUCE").sum()
+with main_tab3:
+    _show_upload3 = not (hourly_file and geo_file)
 
-    m1, m2, m3 = st.columns(3)
-    for col, label, count, pill_cls, emoji in [
-        (m1, "Scale Signals",  n_scale,  "pill-scale",  "🚀"),
-        (m2, "Watch Signals",  n_watch,  "pill-watch",  "⚠️"),
-        (m3, "Reduce Signals", n_reduce, "pill-reduce", "🛑"),
-    ]:
-        with col:
-            st.markdown(
-                f"<div style='background:#F0EAE1;border:1px solid #DDD5CC;border-radius:16px;padding:0.8rem 1rem'>"
-                f"<span class='pill {pill_cls}'>{emoji} {label}</span>"
-                f"<div style='font-size:2rem;font-weight:700;color:#3B2F25;margin-top:0.3rem'>{count}</div>"
-                f"</div>", unsafe_allow_html=True
+# Gate: show upload prompt inside each performance tab if files missing
+def _upload_gate():
+    missing = []
+    if not hourly_file: missing.append("📁 Hourly Report")
+    if not geo_file:    missing.append("📁 GEO Report")
+    if missing:
+        st.markdown(f"""
+        <div style="background:#F0EAE1;border:2px dashed #DDD5CC;border-radius:20px;
+             padding:2.5rem 2rem;text-align:center;margin-top:1rem">
+          <div style="font-size:2rem;margin-bottom:0.6rem">📊</div>
+          <div style="font-size:1rem;font-weight:700;color:#3B2F25;margin-bottom:0.4rem">
+            Upload both files to view this tab
+          </div>
+          <div style="font-size:0.85rem;color:#8B7355">
+            {" &amp; ".join(missing)} needed — use the uploaders at the top of the page
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return False
+    return True
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 2 — PERFORMANCE SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+with main_tab2:
+    if not _files_ready:
+        _upload_gate_inline()
+    else:
+        # ── All KPI values come directly from the Grand Total row ─────────────
+        def _gt(key, fallback):
+            return hourly_grand_total.get(key, fallback)
+
+        total_spend = _gt("spend", hourly_df["spend"].sum() if "spend" in hourly_df.columns else 0)
+        total_subs  = _gt("subs",  hourly_df["subs"].sum()  if "subs"  in hourly_df.columns else 0)
+        avg_cac     = _gt("cac",   0)
+        avg_cpm     = _gt("cpm",   0)
+        avg_cr      = _gt("cr",    0)
+        avg_cpc     = _gt("cpc",   0)
+        avg_ctr     = _gt("ctr",   0)
+        _from_gt    = bool(hourly_grand_total)
+
+        # Best hour
+        if "cac" in hourly_df.columns and not hourly_df.empty:
+            best_row  = hourly_df.loc[hourly_df["cac"].idxmin()]
+            best_hour = int(best_row["hour"])
+            best_cac  = best_row["cac"]
+        else:
+            best_hour = 0; best_cac = 0
+
+        # Last 3h trend
+        last3 = hourly_df.tail(3)
+        last3_avg_cac = last3["cac"].mean() if "cac" in last3.columns else 0
+        trend_pct     = ((last3_avg_cac - avg_cac) / avg_cac * 100) if avg_cac else 0
+        trend_dir     = "📉 Improving" if trend_pct < 0 else "📈 Worsening"
+        trend_class   = "delta-good"  if trend_pct < 0 else "delta-bad"
+
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        cards = [
+            (c1, "Total Spend",        f"${total_spend:,.0f}",  None, None),
+            (c2, "Total Subs",         f"{int(total_subs)}",    None, None),
+            (c3, "CAC (Grand Total)",  f"${avg_cac:.2f}",       f"Best: ${best_cac:.0f} @ H{best_hour}", "delta-good"),
+            (c4, "CPM (Grand Total)",  f"${avg_cpm:.2f}",       "From Grand Total row" if _from_gt else "Calculated", "delta-neutral"),
+            (c5, "CR (Grand Total)",   f"{avg_cr:.2f}%",        "From Grand Total row" if _from_gt else "Calculated", "delta-neutral"),
+            (c6, "Last 3h Trend",      f"{trend_pct:+.1f}%",    trend_dir, trend_class),
+        ]
+        for col, label, val, delta, delta_class in cards:
+            with col:
+                delta_html = f"<div class='delta {delta_class}'>{delta}</div>" if delta else ""
+                st.markdown(f"""
+                <div class='metric-card'>
+                  <div class='label'>{label}</div>
+                  <div class='value'>{val}</div>
+                  {delta_html}
+                </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Compute signals (needed for opportunity card) ─────────────────────
+        signal_df_t2 = compute_signals(geo_df, hourly_df)
+        scale_df_t2  = signal_df_t2[signal_df_t2["Action"] == "SCALE"].sort_values("_roi", ascending=False)
+
+        # ── Current Opportunity card ──────────────────────────────────────────
+        if not scale_df_t2.empty:
+            best_opp = scale_df_t2.iloc[0]
+            st.markdown(f"""
+            <div class='opp-card'>
+              <div class='opp-title'>🚀 Current Best Opportunity</div>
+              <div class='opp-country'>{best_opp["Country"]}</div>
+              <div class='opp-sub'>{best_opp["Window"]} · Local time {best_opp["Local Time"]} · CAC {best_opp["CAC"]}</div>
+              <div class='opp-roi'>{best_opp["ROI"]} ROI</div>
+              <div class='opp-sub' style='margin-top:0.5rem;font-size:0.8rem;opacity:0.7'>{best_opp["Reason"]}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 3 — HOURLY ANALYSIS
+# ══════════════════════════════════════════════════════════════════════════════
+with main_tab3:
+    if not _files_ready:
+        _upload_gate_inline()
+    else:
+        chart_col1, chart_col2 = st.columns([3, 2])
+        with chart_col1:
+            st.caption("CAC vs Conversions by Hour")
+            st.plotly_chart(chart_hourly_cac_subs(hourly_df), use_container_width=True, config={"displayModeBar": False})
+        with chart_col2:
+            st.caption("Spend by Hour (🟢 Efficient · 🟡 Normal · 🔴 Costly)")
+            st.plotly_chart(chart_hourly_spend(hourly_df), use_container_width=True, config={"displayModeBar": False})
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.caption("Raw Hourly Data")
+        st.dataframe(hourly_df, use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 4 — GEO SIGNALS
+# ══════════════════════════════════════════════════════════════════════════════
+with main_tab4:
+    if not _files_ready:
+        _upload_gate_inline()
+    else:
+        signal_df = compute_signals(geo_df, hourly_df)
+        scale_df  = signal_df[signal_df["Action"] == "SCALE"].sort_values("_roi", ascending=False)
+        reduce_df = signal_df[signal_df["Action"] == "REDUCE"].sort_values("_spend", ascending=False)
+
+        n_scale  = (signal_df["Action"] == "SCALE").sum()
+        n_watch  = (signal_df["Action"] == "WATCH").sum()
+        n_reduce = (signal_df["Action"] == "REDUCE").sum()
+
+        m1, m2, m3 = st.columns(3)
+        for col, label, count, pill_cls, emoji in [
+            (m1, "Scale Signals",  n_scale,  "pill-scale",  "🚀"),
+            (m2, "Watch Signals",  n_watch,  "pill-watch",  "⚠️"),
+            (m3, "Reduce Signals", n_reduce, "pill-reduce", "🛑"),
+        ]:
+            with col:
+                st.markdown(
+                    f"<div style='background:#F0EAE1;border:1px solid #DDD5CC;border-radius:16px;padding:0.8rem 1rem'>"
+                    f"<span class='pill {pill_cls}'>{emoji} {label}</span>"
+                    f"<div style='font-size:2rem;font-weight:700;color:#3B2F25;margin-top:0.3rem'>{count}</div>"
+                    f"</div>", unsafe_allow_html=True
+                )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        geo_tab1, geo_tab2, geo_tab3 = st.tabs(["🎯 Signal Table", "🫧 CAC vs ROI Map", "📋 Raw GEO Data"])
+
+        with geo_tab1:
+            display_cols = ["Country","Local Time","Window","Spend","Subs","CAC","ROI","CPM","CR-to-Start","Action","Reason"]
+            display_df   = signal_df[[c for c in display_cols if c in signal_df.columns]].copy()
+
+            def color_action_row(row):
+                styles = {"SCALE":"background-color:#F0FBF4","WATCH":"background-color:#FFFBEE",
+                          "REDUCE":"background-color:#FFF5F5","OK":""}
+                s = styles.get(row.get("Action","OK"),"")
+                return [s]*len(row)
+
+            st.dataframe(display_df.style.apply(color_action_row, axis=1),
+                         use_container_width=True, hide_index=True)
+
+        with geo_tab2:
+            st.caption("Bubble size = Spend. X = CAC ($). Y = ROI (%). Color = Signal.")
+            st.plotly_chart(chart_geo_cac_bubble(signal_df), use_container_width=True, config={"displayModeBar": False})
+
+        with geo_tab3:
+            st.dataframe(geo_df, use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 5 — STRATEGIC VERDICT
+# ══════════════════════════════════════════════════════════════════════════════
+with main_tab5:
+    if not _files_ready:
+        _upload_gate_inline()
+    else:
+        # Need these from tab 2/4 — recompute if needed
+        if 'signal_df' not in dir() or signal_df is None:
+            signal_df = compute_signals(geo_df, hourly_df)
+            scale_df  = signal_df[signal_df["Action"] == "SCALE"].sort_values("_roi", ascending=False)
+            reduce_df = signal_df[signal_df["Action"] == "REDUCE"].sort_values("_spend", ascending=False)
+
+        if 'avg_cac' not in dir() or avg_cac == 0:
+            def _gt(key, fallback):
+                return hourly_grand_total.get(key, fallback)
+            avg_cac = _gt("cac", 0)
+            avg_cr  = _gt("cr",  0)
+            last3   = hourly_df.tail(3)
+            last3_avg_cac = last3["cac"].mean() if "cac" in last3.columns else 0
+            trend_pct = ((last3_avg_cac - avg_cac) / avg_cac * 100) if avg_cac else 0
+
+        # ── Signal bullets ────────────────────────────────────────────────────
+        bullets = []
+
+        if "cac" in hourly_df.columns and not hourly_df.empty:
+            bh = hourly_df.loc[hourly_df["cac"].idxmin()]
+            bullets.append(
+                f"⭐ <b>Star Hour H{int(bh['hour'])}</b>: CAC <b>${bh['cac']:.0f}</b> — "
+                f"<b>{((avg_cac - bh['cac'])/avg_cac*100):.0f}%</b> below daily avg. "
+                f"Protect budget availability for this window."
+            )
+        if "cac" in hourly_df.columns and not hourly_df.empty:
+            wh = hourly_df.loc[hourly_df["cac"].idxmax()]
+            bullets.append(
+                f"🔴 <b>Waste Alert H{int(wh['hour'])}</b>: CAC <b>${wh['cac']:.0f}</b> "
+                f"({((wh['cac'] - avg_cac)/avg_cac*100):.0f}% above avg) on ${wh['spend']:.0f} spend. "
+                f"Apply dayparting or bid caps to this slot."
+            )
+        if not scale_df.empty:
+            top = scale_df.iloc[0]
+            bullets.append(
+                f"🚀 <b>Scale → {top['Country']}</b>: ROI {top['ROI']} · CAC {top['CAC']} · {top['Window']}. "
+                f"Shift freed budget here immediately."
+            )
+        if not reduce_df.empty:
+            top_r = reduce_df.iloc[0]
+            bullets.append(f"🛑 <b>Cut → {top_r['Country']}</b>: {top_r['Reason']}")
+
+        high_cpm = signal_df[signal_df["Action"] == "WATCH"]
+        if not high_cpm.empty:
+            countries = ", ".join(high_cpm["Country"].tolist())
+            bullets.append(f"⚠️ <b>Creative Fatigue Risk</b> — {countries}: CPM above $6. Refresh ad creatives.")
+
+        if "cac" in hourly_df.columns and len(hourly_df) >= 3:
+            bullets.append(
+                f"📊 <b>Last-3h CAC Trend</b>: {trend_pct:+.1f}% vs daily avg "
+                f"({'improving ✅' if trend_pct < 0 else 'worsening ❌'})."
             )
 
-    st.markdown("<br>", unsafe_allow_html=True)
+        for b in bullets:
+            st.markdown(f"<div class='insight-box'>{b}</div>", unsafe_allow_html=True)
 
-    display_cols = ["Country","Local Time","Window","Spend","Subs","CAC","ROI","CPM","CR-to-Start","Action","Reason"]
-    display_df   = signal_df[display_cols].copy() if all(c in signal_df.columns for c in display_cols) else signal_df
+        # ── Verdict Engine ────────────────────────────────────────────────────
+        score = 0
+        score_notes = []
+        W_CAC_TREND = 3; W_SCALE_GEOS = 2; W_REDUCE_GEOS = 2; W_WATCH_GEOS = 1
+        W_CAC_LEVEL = 2; W_CR_LEVEL = 1
+        BLENDED_CAC_BENCHMARK = 80
 
-    def color_action_row(row):
-        action_styles = {
-            "SCALE":  "background-color:#F0FBF4",
-            "WATCH":  "background-color:#FFFBEE",
-            "REDUCE": "background-color:#FFF5F5",
-            "OK":     "",
-        }
-        style = action_styles.get(row.get("Action", "OK"), "")
-        return [style] * len(row)
+        if trend_pct < -10:
+            score += W_CAC_TREND * 2
+            score_notes.append(f"+{W_CAC_TREND*2} CAC trend strongly improving ({trend_pct:+.1f}%)")
+        elif trend_pct < 0:
+            score += W_CAC_TREND
+            score_notes.append(f"+{W_CAC_TREND} CAC trend improving ({trend_pct:+.1f}%)")
+        elif trend_pct > 20:
+            score -= W_CAC_TREND * 2
+            score_notes.append(f"-{W_CAC_TREND*2} CAC trend sharply worsening ({trend_pct:+.1f}%)")
+        else:
+            score -= W_CAC_TREND
+            score_notes.append(f"-{W_CAC_TREND} CAC trend worsening ({trend_pct:+.1f}%)")
 
-    styled = display_df.style.apply(color_action_row, axis=1)
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+        if avg_cac < BLENDED_CAC_BENCHMARK * 0.8:
+            score += W_CAC_LEVEL * 2
+            score_notes.append(f"+{W_CAC_LEVEL*2} Avg CAC ${avg_cac:.0f} well below benchmark ${BLENDED_CAC_BENCHMARK}")
+        elif avg_cac < BLENDED_CAC_BENCHMARK:
+            score += W_CAC_LEVEL
+            score_notes.append(f"+{W_CAC_LEVEL} Avg CAC ${avg_cac:.0f} below benchmark")
+        elif avg_cac < BLENDED_CAC_BENCHMARK * 1.25:
+            score -= W_CAC_LEVEL
+            score_notes.append(f"-{W_CAC_LEVEL} Avg CAC ${avg_cac:.0f} above benchmark")
+        else:
+            score -= W_CAC_LEVEL * 2
+            score_notes.append(f"-{W_CAC_LEVEL*2} Avg CAC ${avg_cac:.0f} significantly above benchmark")
 
-with tab2:
-    if not signal_df.empty:
-        st.caption("Bubble size = Spend. X = CAC ($). Y = ROI (%). Color = Signal.")
-        st.plotly_chart(chart_geo_cac_bubble(signal_df), use_container_width=True, config={"displayModeBar": False})
+        golden_scales = signal_df[
+            (signal_df["Action"] == "SCALE") & (signal_df["Window"].str.contains("Golden", na=False))
+        ]
+        n_golden = len(golden_scales)
+        if n_golden > 0:
+            pts = min(n_golden * W_SCALE_GEOS, 8)
+            score += pts
+            score_notes.append(f"+{pts} {n_golden} GEOs in active golden window with SCALE signal")
 
-with tab3:
-    raw_tab1, raw_tab2 = st.tabs(["Hourly Raw", "GEO Raw"])
-    with raw_tab1:
-        st.dataframe(hourly_df, use_container_width=True, hide_index=True)
-    with raw_tab2:
-        st.dataframe(geo_df, use_container_width=True, hide_index=True)
+        n_reduce_v = len(reduce_df)
+        if n_reduce_v > 0:
+            pts = min(n_reduce_v * W_REDUCE_GEOS, 6)
+            score -= pts
+            score_notes.append(f"-{pts} {n_reduce_v} GEOs flagged REDUCE (waste detected)")
 
+        n_watch = len(signal_df[signal_df["Action"] == "WATCH"])
+        if n_watch > 0:
+            score -= n_watch * W_WATCH_GEOS
+            score_notes.append(f"-{n_watch * W_WATCH_GEOS} {n_watch} GEOs with high CPM / fatigue risk")
 
-# ─────────────────────────────────────────────
-#  STRATEGIC INSIGHTS — VERDICT ENGINE
-# ─────────────────────────────────────────────
-st.markdown("<p class='section-header'>💡 Strategic Insights & Verdict</p>", unsafe_allow_html=True)
+        if avg_cr > 0.8:
+            score += W_CR_LEVEL
+            score_notes.append(f"+{W_CR_LEVEL} CR {avg_cr:.2f}% above 0.8% threshold")
+        elif avg_cr < 0.4:
+            score -= W_CR_LEVEL
+            score_notes.append(f"-{W_CR_LEVEL} CR {avg_cr:.2f}% below 0.4% — funnel underperforming")
 
-# ── Individual signal bullets ──────────────────
-bullets = []
+        if score >= 6:
+            verdict_emoji = "🟢"; verdict_label = "SCALE UP"
+            verdict_color = "#2A7A4B"; verdict_bg = "#D6F0E0"
+            verdict_text = (
+                f"Signals are strongly bullish. Multiple GEOs are in golden windows with efficient CAC, "
+                f"and the recent trend is improving. Increase daily budgets by <b>20–40%</b>, "
+                f"prioritise top SCALE GEOs, and reallocate away from REDUCE markets."
+            )
+        elif score >= 2:
+            verdict_emoji = "🟡"; verdict_label = "HOLD & OPTIMISE"
+            verdict_color = "#7A5A00"; verdict_bg = "#FFF3CD"
+            verdict_text = (
+                f"Mixed signals. Do <b>not</b> increase total budget — redistribute: cut REDUCE GEOs, "
+                f"push more to SCALE GEOs, and apply dayparting to the worst-performing hours."
+            )
+        elif score >= -2:
+            verdict_emoji = "🟠"; verdict_label = "CAUTION — HOLD"
+            verdict_color = "#8B4000"; verdict_bg = "#FFE9CC"
+            verdict_text = (
+                f"Signals are slightly bearish. Freeze any budget increases. Prioritise creative refresh "
+                f"and bid cap implementation before considering any scale."
+            )
+        else:
+            verdict_emoji = "🔴"; verdict_label = "SCALE DOWN"
+            verdict_color = "#8B1A1A"; verdict_bg = "#FFE0E0"
+            verdict_text = (
+                f"Multiple bearish signals. <b>Reduce total budget by 20–30%</b>, pause REDUCE GEOs, "
+                f"implement strict dayparting, and audit creatives for fatigue before any re-scale."
+            )
 
-# 1. Best hour
-if "cac" in hourly_df.columns and not hourly_df.empty:
-    bh = hourly_df.loc[hourly_df["cac"].idxmin()]
-    bullets.append(
-        f"⭐ <b>Star Hour H{int(bh['hour'])}</b>: CAC <b>${bh['cac']:.0f}</b> — "
-        f"<b>{((avg_cac - bh['cac'])/avg_cac*100):.0f}%</b> below daily avg. "
-        f"Protect budget availability for this window."
-    )
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="background:{verdict_bg};border:2px solid {verdict_color};border-radius:20px;padding:1.5rem 2rem;margin-top:0.5rem">
+          <div style="display:flex;align-items:center;gap:0.8rem;margin-bottom:0.8rem">
+            <span style="font-size:1.8rem">{verdict_emoji}</span>
+            <div>
+              <div style="font-size:0.65rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{verdict_color};opacity:0.8">Overall Verdict</div>
+              <div style="font-size:1.6rem;font-weight:800;color:{verdict_color};line-height:1">{verdict_label}</div>
+            </div>
+            <div style="margin-left:auto;background:{verdict_color};color:white;border-radius:999px;padding:0.3rem 1rem;font-size:0.85rem;font-weight:700">
+              Score: {score:+d}
+            </div>
+          </div>
+          <div style="font-size:0.9rem;color:{verdict_color};line-height:1.6;margin-bottom:1rem">{verdict_text}</div>
+          <details>
+            <summary style="font-size:0.72rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:{verdict_color};opacity:0.7;cursor:pointer">
+              Score breakdown ({len(score_notes)} signals)
+            </summary>
+            <div style="margin-top:0.6rem">
+              {"".join(f'<div style="font-size:0.78rem;color:{verdict_color};padding:0.15rem 0;opacity:0.85">· {n}</div>' for n in score_notes)}
+            </div>
+          </details>
+        </div>
+        """, unsafe_allow_html=True)
 
-# 2. Worst hour
-if "cac" in hourly_df.columns and not hourly_df.empty:
-    wh = hourly_df.loc[hourly_df["cac"].idxmax()]
-    bullets.append(
-        f"🔴 <b>Waste Alert H{int(wh['hour'])}</b>: CAC <b>${wh['cac']:.0f}</b> "
-        f"({((wh['cac'] - avg_cac)/avg_cac*100):.0f}% above avg) on ${wh['spend']:.0f} spend. "
-        f"Apply dayparting or bid caps to this slot."
-    )
-
-# 3. Top SCALE GEO
-reduce_df = signal_df[signal_df["Action"] == "REDUCE"].sort_values("_spend", ascending=False)
-if not scale_df.empty:
-    top = scale_df.iloc[0]
-    bullets.append(
-        f"🚀 <b>Scale → {top['Country']}</b>: ROI {top['ROI']} · CAC {top['CAC']} · {top['Window']}. "
-        f"Shift freed budget here immediately."
-    )
-
-# 4. Top REDUCE GEO
-if not reduce_df.empty:
-    top_r = reduce_df.iloc[0]
-    bullets.append(
-        f"🛑 <b>Cut → {top_r['Country']}</b>: {top_r['Reason']}"
-    )
-
-# 5. Creative fatigue
-high_cpm = signal_df[signal_df["Action"] == "WATCH"]
-if not high_cpm.empty:
-    countries = ", ".join(high_cpm["Country"].tolist())
-    bullets.append(
-        f"⚠️ <b>Creative Fatigue Risk</b> — {countries}: CPM above $6. Refresh ad creatives."
-    )
-
-# 6. CAC trend
-if "cac" in hourly_df.columns and len(hourly_df) >= 3:
-    bullets.append(
-        f"📊 <b>Last-3h CAC Trend</b>: {trend_pct:+.1f}% vs daily avg "
-        f"({'improving ✅' if trend_pct < 0 else 'worsening ❌'})."
-    )
-
-for b in bullets:
-    st.markdown(f"<div class='insight-box'>{b}</div>", unsafe_allow_html=True)
-
-# ── VERDICT ENGINE ─────────────────────────────
-# Score: +/- points weighted by signal importance
-# Positive = bullish (scale), Negative = bearish (reduce)
-score = 0
-score_notes = []
-
-# Signal weights
-W_CAC_TREND   = 3   # high weight — recent momentum
-W_SCALE_GEOS  = 2   # per golden-window SCALE GEO
-W_REDUCE_GEOS = 2   # per REDUCE GEO (negative)
-W_WATCH_GEOS  = 1   # mild drag
-W_CAC_LEVEL   = 2   # overall CAC vs benchmark
-W_CR_LEVEL    = 1   # CR signal
-
-BLENDED_CAC_BENCHMARK = 80  # $ — adjust to your target CPA
-
-# 1. CAC trend (most recent signal)
-if trend_pct < -10:
-    score += W_CAC_TREND * 2
-    score_notes.append(f"+{W_CAC_TREND*2} CAC trend strongly improving ({trend_pct:+.1f}%)")
-elif trend_pct < 0:
-    score += W_CAC_TREND
-    score_notes.append(f"+{W_CAC_TREND} CAC trend improving ({trend_pct:+.1f}%)")
-elif trend_pct > 20:
-    score -= W_CAC_TREND * 2
-    score_notes.append(f"-{W_CAC_TREND*2} CAC trend sharply worsening ({trend_pct:+.1f}%)")
-else:
-    score -= W_CAC_TREND
-    score_notes.append(f"-{W_CAC_TREND} CAC trend worsening ({trend_pct:+.1f}%)")
-
-# 2. Blended CAC vs benchmark
-if avg_cac < BLENDED_CAC_BENCHMARK * 0.8:
-    score += W_CAC_LEVEL * 2
-    score_notes.append(f"+{W_CAC_LEVEL*2} Avg CAC ${avg_cac:.0f} well below benchmark ${BLENDED_CAC_BENCHMARK}")
-elif avg_cac < BLENDED_CAC_BENCHMARK:
-    score += W_CAC_LEVEL
-    score_notes.append(f"+{W_CAC_LEVEL} Avg CAC ${avg_cac:.0f} below benchmark")
-elif avg_cac < BLENDED_CAC_BENCHMARK * 1.25:
-    score -= W_CAC_LEVEL
-    score_notes.append(f"-{W_CAC_LEVEL} Avg CAC ${avg_cac:.0f} above benchmark")
-else:
-    score -= W_CAC_LEVEL * 2
-    score_notes.append(f"-{W_CAC_LEVEL*2} Avg CAC ${avg_cac:.0f} significantly above benchmark")
-
-# 3. SCALE GEOs in golden window
-golden_scales = signal_df[
-    (signal_df["Action"] == "SCALE") & (signal_df["Window"].str.contains("Golden", na=False))
-]
-n_golden = len(golden_scales)
-if n_golden > 0:
-    pts = min(n_golden * W_SCALE_GEOS, 8)
-    score += pts
-    score_notes.append(f"+{pts} {n_golden} GEOs in active golden window with SCALE signal")
-
-# 4. REDUCE GEOs
-n_reduce = len(reduce_df)
-if n_reduce > 0:
-    pts = min(n_reduce * W_REDUCE_GEOS, 6)
-    score -= pts
-    score_notes.append(f"-{pts} {n_reduce} GEOs flagged REDUCE (waste detected)")
-
-# 5. WATCH GEOs (mild drag)
-n_watch = len(signal_df[signal_df["Action"] == "WATCH"])
-if n_watch > 0:
-    score -= n_watch * W_WATCH_GEOS
-    score_notes.append(f"-{n_watch * W_WATCH_GEOS} {n_watch} GEOs with high CPM / fatigue risk")
-
-# 6. CR signal
-if avg_cr > 0.8:
-    score += W_CR_LEVEL
-    score_notes.append(f"+{W_CR_LEVEL} CR {avg_cr:.2f}% above 0.8% threshold")
-elif avg_cr < 0.4:
-    score -= W_CR_LEVEL
-    score_notes.append(f"-{W_CR_LEVEL} CR {avg_cr:.2f}% below 0.4% — funnel underperforming")
-
-# ── Verdict ──
-if score >= 6:
-    verdict_emoji = "🟢"
-    verdict_label = "SCALE UP"
-    verdict_color = "#2A7A4B"
-    verdict_bg    = "#D6F0E0"
-    verdict_text  = (
-        f"Signals are strongly bullish. Multiple GEOs are in golden windows with efficient CAC, "
-        f"and the recent trend is improving. This is the time to increase daily budgets by <b>20–40%</b>, "
-        f"prioritise the top SCALE GEOs, and reallocate spend away from REDUCE markets."
-    )
-elif score >= 2:
-    verdict_emoji = "🟡"
-    verdict_label = "HOLD & OPTIMISE"
-    verdict_color = "#7A5A00"
-    verdict_bg    = "#FFF3CD"
-    verdict_text  = (
-        f"Mixed signals. Some markets are performing well but waste exists elsewhere. "
-        f"Do <b>not</b> increase total budget — instead redistribute: cut REDUCE GEOs, "
-        f"push more to SCALE GEOs, and apply dayparting to the worst-performing hours."
-    )
-elif score >= -2:
-    verdict_emoji = "🟠"
-    verdict_label = "CAUTION — HOLD"
-    verdict_color = "#8B4000"
-    verdict_bg    = "#FFE9CC"
-    verdict_text  = (
-        f"Signals are slightly bearish. CAC is elevated or trending up. "
-        f"Freeze any budget increases. Prioritise creative refresh and bid cap implementation "
-        f"before considering any scale. Monitor for 24h before re-evaluating."
-    )
-else:
-    verdict_emoji = "🔴"
-    verdict_label = "SCALE DOWN"
-    verdict_color = "#8B1A1A"
-    verdict_bg    = "#FFE0E0"
-    verdict_text  = (
-        f"Multiple bearish signals. Wasted spend is material, CAC is above benchmark, "
-        f"and the trend is deteriorating. <b>Reduce total budget by 20–30%</b>, pause REDUCE GEOs, "
-        f"implement strict dayparting, and audit creatives for fatigue before any re-scale."
-    )
-
-st.markdown("<br>", unsafe_allow_html=True)
-st.markdown(f"""
-<div style="background:{verdict_bg};border:2px solid {verdict_color};border-radius:20px;padding:1.5rem 2rem;margin-top:0.5rem">
-  <div style="display:flex;align-items:center;gap:0.8rem;margin-bottom:0.8rem">
-    <span style="font-size:1.8rem">{verdict_emoji}</span>
-    <div>
-      <div style="font-size:0.65rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:{verdict_color};opacity:0.8">Overall Verdict</div>
-      <div style="font-size:1.6rem;font-weight:800;color:{verdict_color};line-height:1">{verdict_label}</div>
-    </div>
-    <div style="margin-left:auto;background:{verdict_color};color:white;border-radius:999px;padding:0.3rem 1rem;font-size:0.85rem;font-weight:700">
-      Score: {score:+d}
-    </div>
-  </div>
-  <div style="font-size:0.9rem;color:{verdict_color};line-height:1.6;margin-bottom:1rem">{verdict_text}</div>
-  <details>
-    <summary style="font-size:0.72rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:{verdict_color};opacity:0.7;cursor:pointer">
-      Score breakdown ({len(score_notes)} signals)
-    </summary>
-    <div style="margin-top:0.6rem">
-      {"".join(f'<div style="font-size:0.78rem;color:{verdict_color};padding:0.15rem 0;opacity:0.85">· {n}</div>' for n in score_notes)}
-    </div>
-  </details>
-</div>
-""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 #  FOOTER
@@ -1643,7 +2002,7 @@ st.markdown(f"""
 st.markdown("<br>", unsafe_allow_html=True)
 st.markdown(
     "<div style='text-align:center;font-size:0.72rem;color:#8B7355;padding:1rem 0;border-top:1px solid #DDD5CC'>"
-    "Dressly UA Dashboard · Built for Media Buyers · Data refreshes on upload"
+    "Dressly UA Dashboard · Built for Media Buyers · Holidays auto-update each year via Python holidays library"
     "</div>",
     unsafe_allow_html=True,
 )

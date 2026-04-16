@@ -2018,10 +2018,83 @@ with main_tab6:
     import json
     from datetime import date, timedelta
     import calendar as cal_lib
+    import sqlite3 as _sqlite3
+    import pathlib as _pathlib
 
-    # ── Persistent storage via session state ──────────────────────────────────
-    if "cal_events" not in st.session_state:
-        st.session_state["cal_events"] = []   # list of dicts: {date, name, country, color, source}
+    # ── SQLite persistent storage ─────────────────────────────────────────────
+    # DB file lives next to app.py — persists across browser refreshes and
+    # Streamlit Cloud restarts (note: resets on a fresh redeploy from git).
+    _DB_PATH = _pathlib.Path(__file__).parent / "calendar_events.db"
+
+    def _db_connect():
+        conn = _sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                date     TEXT    NOT NULL,
+                name     TEXT    NOT NULL,
+                country  TEXT    NOT NULL,
+                flag     TEXT    DEFAULT '',
+                color    TEXT    DEFAULT '#4A90D9',
+                source   TEXT    DEFAULT 'manual',
+                category TEXT    DEFAULT '',
+                platform TEXT    DEFAULT '',
+                impact   TEXT    DEFAULT '',
+                notes    TEXT    DEFAULT ''
+            )
+        """)
+        # Add new columns to existing DB if upgrading from old schema
+        existing_cols = [r[1] for r in conn.execute("PRAGMA table_info(events)").fetchall()]
+        for col, dtype in [("category","TEXT"), ("platform","TEXT"), ("impact","TEXT"), ("notes","TEXT")]:
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE events ADD COLUMN {col} {dtype} DEFAULT ''")
+        conn.commit()
+        return conn
+
+    def _db_load_events() -> list[dict]:
+        conn = _db_connect()
+        rows = conn.execute(
+            "SELECT id, date, name, country, flag, color, source, "
+            "       COALESCE(category,''), COALESCE(platform,''), "
+            "       COALESCE(impact,''), COALESCE(notes,'') "
+            "FROM events ORDER BY date ASC"
+        ).fetchall()
+        conn.close()
+        return [
+            {"id": r[0], "date": r[1], "name": r[2], "country": r[3],
+             "flag": r[4], "color": r[5], "source": r[6],
+             "category": r[7], "platform": r[8], "impact": r[9], "notes": r[10]}
+            for r in rows
+        ]
+
+    def _db_add_event(ev: dict):
+        conn = _db_connect()
+        conn.execute(
+            "INSERT INTO events (date, name, country, flag, color, source, category, platform, impact, notes) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ev["date"], ev["name"], ev["country"], ev.get("flag",""), ev.get("color","#4A90D9"),
+             ev.get("source","manual"), ev.get("category",""), ev.get("platform",""),
+             ev.get("impact",""), ev.get("notes",""))
+        )
+        conn.commit()
+        conn.close()
+
+    def _db_delete_where(condition_sql: str, params: tuple = ()):
+        conn = _db_connect()
+        conn.execute(f"DELETE FROM events WHERE {condition_sql}", params)
+        conn.commit()
+        conn.close()
+
+    def _db_clear_all():
+        conn = _db_connect()
+        conn.execute("DELETE FROM events")
+        conn.commit()
+        conn.close()
+
+    # Load from DB into session state on first run (or after rerun)
+    if "cal_events_loaded" not in st.session_state:
+        st.session_state["cal_events"] = _db_load_events()
+        st.session_state["cal_events_loaded"] = True
 
     # ── Country list for the dropdown ─────────────────────────────────────────
     CAL_COUNTRIES = [
@@ -2128,7 +2201,7 @@ with main_tab6:
             ev_color   = EVENT_COLORS[ev_color_lbl]
             submitted  = st.form_submit_button("Add to Calendar", use_container_width=True)
             if submitted and ev_name:
-                st.session_state["cal_events"].append({
+                _db_add_event({
                     "date":    ev_date.isoformat(),
                     "name":    ev_name,
                     "country": ev_country,
@@ -2136,7 +2209,8 @@ with main_tab6:
                     "color":   ev_color,
                     "source":  "manual",
                 })
-                st.success(f"Added: {ev_name} on {ev_date}")
+                st.session_state["cal_events"] = _db_load_events()
+                st.success(f"✅ Saved: {ev_name} on {ev_date}")
 
         st.markdown("---")
         st.markdown("### 🗺️ Load Public Holidays")
@@ -2147,22 +2221,24 @@ with main_tab6:
             if load_btn:
                 new_events = load_country_holidays_to_cal(hl_country, hl_year)
                 # Remove existing auto-events for same country+year to avoid duplicates
-                st.session_state["cal_events"] = [
-                    e for e in st.session_state["cal_events"]
-                    if not (e["country"] == hl_country
-                            and e["source"] == "auto"
-                            and e["date"].startswith(str(hl_year)))
-                ]
-                st.session_state["cal_events"].extend(new_events)
-                st.success(f"Loaded {len(new_events)} holidays for {hl_country} {hl_year}")
+                _db_delete_where(
+                    "country=? AND source='auto' AND date LIKE ?",
+                    (hl_country, f"{hl_year}%")
+                )
+                for ev in new_events:
+                    _db_add_event(ev)
+                st.session_state["cal_events"] = _db_load_events()
+                st.success(f"✅ Saved {len(new_events)} holidays for {hl_country} {hl_year}")
 
         st.markdown("---")
         # Country filter for calendar view
         all_cal_countries = sorted(set(e["country"] for e in st.session_state["cal_events"]))
         if all_cal_countries:
             cal_filter_countries = st.multiselect(
-                "Show countries", all_cal_countries, default=all_cal_countries,
-                label_visibility="visible"
+                "Show countries / platforms", all_cal_countries,
+                default=all_cal_countries,   # all shown by default
+                label_visibility="visible",
+                help="All events are visible by default. Deselect to hide specific categories."
             )
         else:
             cal_filter_countries = []
@@ -2171,12 +2247,12 @@ with main_tab6:
         ccol1, ccol2 = st.columns(2)
         with ccol1:
             if st.button("🗑️ Clear Manual", use_container_width=True):
-                st.session_state["cal_events"] = [
-                    e for e in st.session_state["cal_events"] if e["source"] != "manual"
-                ]
+                _db_delete_where("source='manual'")
+                st.session_state["cal_events"] = _db_load_events()
                 st.rerun()
         with ccol2:
             if st.button("🗑️ Clear All", use_container_width=True):
+                _db_clear_all()
                 st.session_state["cal_events"] = []
                 st.rerun()
 
@@ -2310,14 +2386,31 @@ with main_tab6:
                     ev_date_fmt = datetime.strptime(ev["date"], "%Y-%m-%d").strftime("%a %b %d")
                     flag = ev.get("flag", "")
                     dot = f"<span style='display:inline-block;width:10px;height:10px;background:{ev['color']};border-radius:50%;margin-right:6px'></span>"
-                    src_badge = "<span style='background:#EAE4DC;font-size:0.62rem;padding:1px 6px;border-radius:8px;color:#8B7355'>auto</span>" if ev["source"] == "auto" else "<span style='background:#D6F0E0;font-size:0.62rem;padding:1px 6px;border-radius:8px;color:#2A7A4B'>manual</span>"
+                    # Source badge
+                    if ev["source"] == "seeded":
+                        src_badge = "<span style='background:#EEF0FF;font-size:0.6rem;padding:1px 6px;border-radius:8px;color:#4A5499'>seeded</span>"
+                    elif ev["source"] == "auto":
+                        src_badge = "<span style='background:#EAE4DC;font-size:0.6rem;padding:1px 6px;border-radius:8px;color:#8B7355'>auto</span>"
+                    else:
+                        src_badge = "<span style='background:#D6F0E0;font-size:0.6rem;padding:1px 6px;border-radius:8px;color:#2A7A4B'>manual</span>"
+                    # Impact badge
+                    impact = ev.get("impact", "")
+                    imp_colors = {"high": ("#FFE0E0","#8B1A1A"), "med": ("#FFF3CD","#7A5A00"), "low": ("#F0EAE1","#8B7355")}
+                    ibg, ifc = imp_colors.get(impact, ("#F0EAE1","#8B7355"))
+                    imp_badge = f"<span style='background:{ibg};color:{ifc};font-size:0.6rem;padding:1px 6px;border-radius:8px;font-weight:600'>{impact}</span>" if impact else ""
+                    # Category
+                    cat = ev.get("category", "")
+                    cat_badge = f"<span style='font-size:0.6rem;color:#8B7355;padding:1px 6px;border-radius:8px;background:#F7F3EE'>{cat}</span>" if cat else ""
+                    notes = ev.get("notes", "")
+                    notes_html = f"<div style='font-size:0.72rem;color:#8B7355;margin-top:2px;padding-left:16px'>{notes[:120]}{'…' if len(notes)>120 else ''}</div>" if notes else ""
                     st.markdown(
-                        f"<div style='display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.6rem;"
-                        f"border-bottom:1px solid #EDE6DC;font-size:0.82rem'>"
-                        f"{dot}<b style='color:#3B2F25;min-width:90px'>{ev_date_fmt}</b>"
+                        f"<div style='padding:0.4rem 0.6rem;border-bottom:1px solid #EDE6DC'>"
+                        f"<div style='display:flex;align-items:center;gap:0.4rem;font-size:0.82rem'>"
+                        f"{dot}<b style='color:#3B2F25;min-width:85px'>{ev_date_fmt}</b>"
                         f"<span>{flag} {ev['country']}</span>"
-                        f"<span style='color:#3B2F25;flex:1'>{ev['name']}</span>"
-                        f"{src_badge}</div>",
+                        f"<span style='color:#3B2F25;flex:1;font-weight:500'>{ev['name']}</span>"
+                        f"{imp_badge} {cat_badge} {src_badge}"
+                        f"</div>{notes_html}</div>",
                         unsafe_allow_html=True
                     )
             else:

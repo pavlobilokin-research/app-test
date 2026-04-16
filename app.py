@@ -2193,30 +2193,90 @@ with main_tab6:
 
     with cal_ctrl2:
 
+        # ── PLATFORMS list ────────────────────────────────────────────────────
+        CAL_PLATFORMS = ["Meta", "Google", "TikTok", "AppLovin"]
+        PLATFORM_FLAG = {"Meta": "📘", "Google": "🔍", "TikTok": "🎵", "AppLovin": "📱"}
+
         # ── 1. ADD MANUAL EVENT ───────────────────────────────────────────────
         st.markdown("### ➕ Add Event")
         with st.form("add_event_form", clear_on_submit=True):
-            ev_country   = st.selectbox("Country", CAL_COUNTRIES, key="ev_country")
             ev_name      = st.text_input("Event name", placeholder="e.g. Black Friday, Campaign Launch")
             ev_date      = st.date_input("Date", value=now_cal.date())
+
+            # Country (optional) + Platform (optional) — at least one required
+            ev_country   = st.selectbox(
+                "Country (optional)", ["— None —"] + CAL_COUNTRIES, key="ev_country"
+            )
+            ev_platform  = st.selectbox(
+                "Platform (optional)", ["— None —"] + CAL_PLATFORMS, key="ev_platform"
+            )
             ev_color_lbl = st.selectbox("Color", list(EVENT_COLORS.keys()))
             ev_color     = EVENT_COLORS[ev_color_lbl]
             submitted    = st.form_submit_button("Add to Calendar", use_container_width=True)
-            if submitted and ev_name:
-                _db_add_event({
-                    "date":    ev_date.isoformat(),
-                    "name":    ev_name,
-                    "country": ev_country,
-                    "flag":    CAL_COUNTRY_FLAG.get(ev_country, ""),
-                    "color":   ev_color,
-                    "source":  "manual",
-                })
-                st.session_state["cal_events"] = _db_load_events()
-                st.success(f"✅ Saved: {ev_name} on {ev_date}")
+
+            if submitted:
+                if not ev_name:
+                    st.warning("Please enter an event name.")
+                elif ev_country == "— None —" and ev_platform == "— None —":
+                    st.warning("Select at least a Country or a Platform.")
+                else:
+                    # Build display label: platform takes precedence for flag/name if set
+                    if ev_platform != "— None —" and ev_country != "— None —":
+                        display_country = f"{ev_country} / {ev_platform}"
+                        flag = f"{CAL_COUNTRY_FLAG.get(ev_country, '')} {PLATFORM_FLAG.get(ev_platform, '')}"
+                    elif ev_platform != "— None —":
+                        display_country = ev_platform
+                        flag = PLATFORM_FLAG.get(ev_platform, "")
+                    else:
+                        display_country = ev_country
+                        flag = CAL_COUNTRY_FLAG.get(ev_country, "")
+                    _db_add_event({
+                        "date":    ev_date.isoformat(),
+                        "name":    ev_name,
+                        "country": display_country,
+                        "flag":    flag,
+                        "color":   ev_color,
+                        "source":  "manual",
+                        "platform": ev_platform if ev_platform != "— None —" else "",
+                    })
+                    st.session_state["cal_events"] = _db_load_events()
+                    st.success(f"✅ Saved: {ev_name} on {ev_date}")
 
         st.markdown("---")
 
-        # ── 2. LOAD PUBLIC HOLIDAYS — checkboxes, no dropdown ─────────────────
+        # ── 2. EDIT EVENT in session state ────────────────────────────────────
+        if st.session_state.get("editing_event_id"):
+            eid   = st.session_state["editing_event_id"]
+            e_obj = next((e for e in st.session_state["cal_events"] if e["id"] == eid), None)
+            if e_obj:
+                st.markdown("### ✏️ Edit Event")
+                with st.form("edit_event_form", clear_on_submit=True):
+                    edit_name  = st.text_input("Event name", value=e_obj["name"])
+                    edit_date  = st.date_input("Date", value=datetime.strptime(e_obj["date"], "%Y-%m-%d").date())
+                    color_keys = list(EVENT_COLORS.keys())
+                    color_vals = list(EVENT_COLORS.values())
+                    cur_ci     = color_vals.index(e_obj["color"]) if e_obj["color"] in color_vals else 0
+                    edit_color_lbl = st.selectbox("Color", color_keys, index=cur_ci)
+                    edit_color = EVENT_COLORS[edit_color_lbl]
+                    save_edit  = st.form_submit_button("Save Changes", use_container_width=True)
+                    cancel_btn = st.form_submit_button("Cancel", use_container_width=True)
+                    if save_edit and edit_name:
+                        import sqlite3 as _sq2
+                        conn2 = _db_connect()
+                        conn2.execute(
+                            "UPDATE events SET name=?, date=?, color=? WHERE id=?",
+                            (edit_name, edit_date.isoformat(), edit_color, eid)
+                        )
+                        conn2.commit(); conn2.close()
+                        st.session_state["cal_events"] = _db_load_events()
+                        st.session_state["editing_event_id"] = None
+                        st.rerun()
+                    if cancel_btn:
+                        st.session_state["editing_event_id"] = None
+                        st.rerun()
+            st.markdown("---")
+
+        # ── 3. LOAD PUBLIC HOLIDAYS — checkboxes, no dropdown ─────────────────
         st.markdown("### 🗺️ Load Public Holidays")
         hl_year = st.selectbox(
             "Year", [now_cal.year, now_cal.year + 1],
@@ -2224,15 +2284,12 @@ with main_tab6:
             label_visibility="visible"
         )
 
-        # Which countries already have auto-holidays loaded for this year?
         already_loaded = set(
             e["country"] for e in st.session_state["cal_events"]
             if e["source"] == "auto" and e["date"].startswith(str(hl_year))
         )
 
-        st.caption("Check to load · Uncheck to remove from calendar (data stays in DB)")
-
-        # Scroll container for the country checklist
+        st.caption("✅ = loaded · uncheck to remove")
         checkbox_container = st.container(height=260)
         with checkbox_container:
             for country in CAL_COUNTRIES:
@@ -2243,82 +2300,20 @@ with main_tab6:
                     key=f"hl_chk_{country}_{hl_year}"
                 )
                 if new_state and not is_checked:
-                    # User just checked → load holidays into DB
                     new_events = load_country_holidays_to_cal(country, hl_year)
-                    _db_delete_where(
-                        "country=? AND source='auto' AND date LIKE ?",
-                        (country, f"{hl_year}%")
-                    )
+                    _db_delete_where("country=? AND source='auto' AND date LIKE ?", (country, f"{hl_year}%"))
                     for ev in new_events:
                         _db_add_event(ev)
                     st.session_state["cal_events"] = _db_load_events()
                     st.rerun()
                 elif not new_state and is_checked:
-                    # User just unchecked → remove from DB (but seeded events stay)
-                    _db_delete_where(
-                        "country=? AND source='auto' AND date LIKE ?",
-                        (country, f"{hl_year}%")
-                    )
+                    _db_delete_where("country=? AND source='auto' AND date LIKE ?", (country, f"{hl_year}%"))
                     st.session_state["cal_events"] = _db_load_events()
                     st.rerun()
 
-        st.markdown("---")
-
-        # ── 3. VISIBILITY FILTER — hide/show without deleting ─────────────────
-        # Uses session state so nothing is ever deleted from the DB
+        # cal_filter_countries = all countries (no hide/show UI — everything visible)
         all_cal_countries = sorted(set(e["country"] for e in st.session_state["cal_events"]))
-
-        if "cal_hidden" not in st.session_state:
-            st.session_state["cal_hidden"] = set()   # set of hidden country/platform names
-
-        st.markdown("### 👁️ Show / Hide")
-        st.caption("Toggle visibility. Events are never deleted.")
-
-        if all_cal_countries:
-            # Quick actions
-            qc1, qc2 = st.columns(2)
-            with qc1:
-                if st.button("Show All", use_container_width=True, key="show_all_btn"):
-                    st.session_state["cal_hidden"] = set()
-                    st.rerun()
-            with qc2:
-                if st.button("Hide All", use_container_width=True, key="hide_all_btn"):
-                    st.session_state["cal_hidden"] = set(all_cal_countries)
-                    st.rerun()
-
-            vis_container = st.container(height=180)
-            with vis_container:
-                for country in all_cal_countries:
-                    currently_hidden = country in st.session_state["cal_hidden"]
-                    visible = st.checkbox(
-                        country,
-                        value=not currently_hidden,
-                        key=f"vis_{country}"
-                    )
-                    if visible and currently_hidden:
-                        st.session_state["cal_hidden"].discard(country)
-                        st.rerun()
-                    elif not visible and not currently_hidden:
-                        st.session_state["cal_hidden"].add(country)
-                        st.rerun()
-        else:
-            st.caption("No events loaded yet.")
-
-        # cal_filter_countries = what's actually visible
-        cal_filter_countries = [
-            c for c in all_cal_countries
-            if c not in st.session_state.get("cal_hidden", set())
-        ]
-
-        st.markdown("---")
-
-        # ── 4. DELETE MANUAL EVENTS ONLY ──────────────────────────────────────
-        st.markdown("### 🗑️ Delete")
-        st.caption("Only manually added events can be deleted.")
-        if st.button("Delete all manual events", use_container_width=True, key="del_manual_btn"):
-            _db_delete_where("source='manual'")
-            st.session_state["cal_events"] = _db_load_events()
-            st.rerun()
+        cal_filter_countries = all_cal_countries
 
     # ── Main calendar view ────────────────────────────────────────────────────
     with cal_ctrl1:
@@ -2446,10 +2441,13 @@ with main_tab6:
                 key=lambda x: x["date"]
             )
             if month_events:
+                if "editing_event_id" not in st.session_state:
+                    st.session_state["editing_event_id"] = None
+
                 for ev in month_events:
                     ev_date_fmt = datetime.strptime(ev["date"], "%Y-%m-%d").strftime("%a %b %d")
-                    flag = ev.get("flag", "")
-                    dot = f"<span style='display:inline-block;width:10px;height:10px;background:{ev['color']};border-radius:50%;margin-right:6px'></span>"
+                    flag  = ev.get("flag", "")
+                    dot   = f"<span style='display:inline-block;width:10px;height:10px;background:{ev['color']};border-radius:50%;margin-right:6px'></span>"
                     # Source badge
                     if ev["source"] == "seeded":
                         src_badge = "<span style='background:#EEF0FF;font-size:0.6rem;padding:1px 6px;border-radius:8px;color:#4A5499'>seeded</span>"
@@ -2457,26 +2455,41 @@ with main_tab6:
                         src_badge = "<span style='background:#EAE4DC;font-size:0.6rem;padding:1px 6px;border-radius:8px;color:#8B7355'>auto</span>"
                     else:
                         src_badge = "<span style='background:#D6F0E0;font-size:0.6rem;padding:1px 6px;border-radius:8px;color:#2A7A4B'>manual</span>"
-                    # Impact badge
                     impact = ev.get("impact", "")
                     imp_colors = {"high": ("#FFE0E0","#8B1A1A"), "med": ("#FFF3CD","#7A5A00"), "low": ("#F0EAE1","#8B7355")}
                     ibg, ifc = imp_colors.get(impact, ("#F0EAE1","#8B7355"))
                     imp_badge = f"<span style='background:{ibg};color:{ifc};font-size:0.6rem;padding:1px 6px;border-radius:8px;font-weight:600'>{impact}</span>" if impact else ""
-                    # Category
                     cat = ev.get("category", "")
                     cat_badge = f"<span style='font-size:0.6rem;color:#8B7355;padding:1px 6px;border-radius:8px;background:#F7F3EE'>{cat}</span>" if cat else ""
                     notes = ev.get("notes", "")
-                    notes_html = f"<div style='font-size:0.72rem;color:#8B7355;margin-top:2px;padding-left:16px'>{notes[:120]}{'…' if len(notes)>120 else ''}</div>" if notes else ""
-                    st.markdown(
-                        f"<div style='padding:0.4rem 0.6rem;border-bottom:1px solid #EDE6DC'>"
-                        f"<div style='display:flex;align-items:center;gap:0.4rem;font-size:0.82rem'>"
-                        f"{dot}<b style='color:#3B2F25;min-width:85px'>{ev_date_fmt}</b>"
-                        f"<span>{flag} {ev['country']}</span>"
-                        f"<span style='color:#3B2F25;flex:1;font-weight:500'>{ev['name']}</span>"
-                        f"{imp_badge} {cat_badge} {src_badge}"
-                        f"</div>{notes_html}</div>",
-                        unsafe_allow_html=True
-                    )
+                    notes_html = f"<div style='font-size:0.72rem;color:#8B7355;margin-top:3px;padding-left:16px'>{notes[:140]}{'…' if len(notes)>140 else ''}</div>" if notes else ""
+
+                    # Row with Edit/Delete buttons for manual events
+                    row_l, row_r = st.columns([9, 1])
+                    with row_l:
+                        st.markdown(
+                            f"<div style='padding:0.35rem 0;border-bottom:1px solid #EDE6DC'>"
+                            f"<div style='display:flex;align-items:center;gap:0.4rem;font-size:0.82rem'>"
+                            f"{dot}<b style='color:#3B2F25;min-width:85px'>{ev_date_fmt}</b>"
+                            f"<span>{flag} {ev['country']}</span>"
+                            f"<span style='color:#3B2F25;flex:1;font-weight:500'>{ev['name']}</span>"
+                            f"{imp_badge} {cat_badge} {src_badge}"
+                            f"</div>{notes_html}</div>",
+                            unsafe_allow_html=True
+                        )
+                    with row_r:
+                        if ev["source"] == "manual":
+                            # Edit button
+                            if st.button("✏️", key=f"edit_{ev['id']}", help="Edit event",
+                                         use_container_width=True):
+                                st.session_state["editing_event_id"] = ev["id"]
+                                st.rerun()
+                            # Delete button
+                            if st.button("🗑", key=f"del_{ev['id']}", help="Delete event",
+                                         use_container_width=True):
+                                _db_delete_where("id=?", (ev["id"],))
+                                st.session_state["cal_events"] = _db_load_events()
+                                st.rerun()
             else:
                 st.caption("No events this month.")
 

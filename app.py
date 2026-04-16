@@ -1277,12 +1277,13 @@ def _upload_gate_inline():
 # ─────────────────────────────────────────────
 #  MAIN TABS
 # ─────────────────────────────────────────────
-main_tab1, main_tab2, main_tab3, main_tab4, main_tab5 = st.tabs([
+main_tab1, main_tab2, main_tab3, main_tab4, main_tab5, main_tab6 = st.tabs([
     "🌍 World Clock & Holidays",
     "📊 Performance Summary",
     "📈 Hourly Analysis",
     "🎯 GEO Signals",
     "💡 Strategic Verdict",
+    "📅 Marketing Calendar",
 ])
 
 
@@ -1371,25 +1372,28 @@ with main_tab1:
         "South Africa":"🇿🇦",
     }
 
+    # States in the exact requested order, with representative city timezone
     US_STATES = [
-        ("New York",       "America/New_York",      "ET"),
-        ("Chicago",        "America/Chicago",        "CT"),
-        ("Denver",         "America/Denver",         "MT"),
-        ("Los Angeles",    "America/Los_Angeles",    "PT"),
-        ("Phoenix",        "America/Phoenix",        "AZ"),
-        ("Anchorage",      "America/Anchorage",      "AK"),
-        ("Honolulu",       "Pacific/Honolulu",       "HI"),
+        ("Texas",           "America/Chicago",       "TX"),
+        ("California",      "America/Los_Angeles",   "CA"),
+        ("Florida",         "America/New_York",      "FL"),
+        ("New York",        "America/New_York",      "NY"),
+        ("Georgia",         "America/New_York",      "GA"),
+        ("Illinois",        "America/Chicago",       "IL"),
+        ("North Carolina",  "America/New_York",      "NC"),
+        ("Pennsylvania",    "America/New_York",      "PA"),
+        ("Ohio",            "America/New_York",      "OH"),
+        ("New Jersey",      "America/New_York",      "NJ"),
+        ("Virginia",        "America/New_York",      "VA"),
+        ("Michigan",        "America/Detroit",       "MI"),
+        ("Colorado",        "America/Denver",        "CO"),
+        ("Washington",      "America/Los_Angeles",   "WA"),
+        ("Tennessee",       "America/Chicago",       "TN"),
+        ("Massachusetts",   "America/New_York",      "MA"),
+        ("Indiana",         "America/Indiana/Indianapolis", "IN"),
     ]
 
-    US_STATE_ISO = {
-        "New York":    "NY",
-        "Chicago":     "IL",
-        "Denver":      "CO",
-        "Los Angeles": "CA",
-        "Phoenix":     "AZ",
-        "Anchorage":   "AK",
-        "Honolulu":    "HI",
-    }
+    US_STATE_ISO = {s[0]: s[2] for s in US_STATES}
 
     def get_holidays_for_year(iso2: str, year: int) -> dict:
         """Return {date: name} dict for a country/year, always in English."""
@@ -1460,16 +1464,17 @@ with main_tab1:
     def build_clock_rows():
         rows = []
 
-        # ── USA first — country row then each state ──────────────────────────
+        # ── USA first — collapsible country row + states ─────────────────────
         us_iso  = "US"
         us_flag = "🇺🇸"
         us_fed_hol = today_holiday(us_iso)
 
-        # country-level (ET as representative)
         et_tz    = pytz.timezone("America/New_York")
         et_local = now_utc_wc.astimezone(et_tz)
         et_h     = et_local.hour
         win_label, win_bg = window_label(et_h)
+        us_expanded = st.session_state.get("us_expanded", False)
+        toggle_label = "▼ United States (click to collapse)" if us_expanded else "▶ United States (click to expand states)"
         rows.append({
             "flag": us_flag,
             "country": "United States",
@@ -1483,29 +1488,32 @@ with main_tab1:
             "upcoming": upcoming_holidays(us_iso, n=3),
             "is_state": False,
             "is_country_header": True,
+            "toggle_label": toggle_label,
+            "us_expanded": us_expanded,
         })
 
-        for state_name, tz_str, tz_code in US_STATES:
-            state_iso = US_STATE_ISO[state_name]
-            tz_obj    = pytz.timezone(tz_str)
-            local_dt  = now_utc_wc.astimezone(tz_obj)
-            lh        = local_dt.hour
-            wl, wb    = window_label(lh)
-            state_hol = today_holiday(us_iso, state_iso=state_iso)
-            rows.append({
-                "flag": "  ",
-                "country": f"  {state_name}",
-                "detail": tz_code,
-                "tz_str": tz_str,
-                "local_time": local_dt.strftime("%H:%M"),
-                "local_hour": lh,
-                "window": wl,
-                "win_bg": wb,
-                "today_hol": state_hol or "",
-                "upcoming": upcoming_holidays(us_iso, n=2, state_iso=state_iso),
-                "is_state": True,
-                "is_country_header": False,
-            })
+        if us_expanded:
+            for state_name, tz_str, tz_code in US_STATES:
+                state_iso = US_STATE_ISO[state_name]
+                tz_obj    = pytz.timezone(tz_str)
+                local_dt  = now_utc_wc.astimezone(tz_obj)
+                lh        = local_dt.hour
+                wl, wb    = window_label(lh)
+                state_hol = today_holiday(us_iso, state_iso=state_iso)
+                rows.append({
+                    "flag": "  ",
+                    "country": f"  {state_name}",
+                    "detail": tz_code,
+                    "tz_str": tz_str,
+                    "local_time": local_dt.strftime("%H:%M"),
+                    "local_hour": lh,
+                    "window": wl,
+                    "win_bg": wb,
+                    "today_hol": state_hol or "",
+                    "upcoming": upcoming_holidays(us_iso, n=2, state_iso=state_iso),
+                    "is_state": True,
+                    "is_country_header": False,
+                })
 
         # ── All other countries alphabetically ───────────────────────────────
         for country in sorted(COUNTRY_ISO.keys()):
@@ -1584,7 +1592,9 @@ with main_tab1:
             for col_obj, row in zip(cols, row_group):
                 with col_obj:
                     if row["is_country_header"]:
-                        # Country header — darker style
+                        hol_html = (f'<div style="margin-top:0.5rem;background:#4CAF72;border-radius:8px;'
+                                    f'padding:0.2rem 0.5rem;font-size:0.7rem;color:white;font-weight:700">'
+                                    f'🎉 {row["today_hol"]}</div>') if row["today_hol"] else ""
                         st.markdown(f"""
                         <div style="background:#3B2F25;border-radius:16px;padding:1rem 1.2rem;margin-bottom:0.6rem">
                           <div style="display:flex;justify-content:space-between;align-items:center">
@@ -1592,9 +1602,14 @@ with main_tab1:
                             <span style="font-size:0.65rem;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#DDD5CC">{row['country']}</span>
                             <span style="font-size:0.7rem;color:#8B7355">{row['detail']}</span>
                           </div>
-                          {'<div style="margin-top:0.5rem;background:#4CAF72;border-radius:8px;padding:0.2rem 0.5rem;font-size:0.7rem;color:white;font-weight:700">🎉 ' + row["today_hol"] + '</div>' if row["today_hol"] else ""}
+                          {hol_html}
                         </div>
                         """, unsafe_allow_html=True)
+                        # Toggle button rendered as a real Streamlit button
+                        toggle_lbl = row.get("toggle_label", "▶ Expand states")
+                        if st.button(toggle_lbl, key="us_toggle", use_container_width=True):
+                            st.session_state["us_expanded"] = not st.session_state.get("us_expanded", False)
+                            st.rerun()
                     else:
                         hol_badge = ""
                         if row["today_hol"]:
@@ -1994,6 +2009,319 @@ with main_tab5:
           </details>
         </div>
         """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 6 — MARKETING CALENDAR
+# ══════════════════════════════════════════════════════════════════════════════
+with main_tab6:
+    import json
+    from datetime import date, timedelta
+    import calendar as cal_lib
+
+    # ── Persistent storage via session state ──────────────────────────────────
+    if "cal_events" not in st.session_state:
+        st.session_state["cal_events"] = []   # list of dicts: {date, name, country, color, source}
+
+    # ── Country list for the dropdown ─────────────────────────────────────────
+    CAL_COUNTRIES = [
+        "United States", "United Arab Emirates", "Austria", "Australia",
+        "Belgium", "Bulgaria", "Canada", "Switzerland", "Chile", "Colombia",
+        "Costa Rica", "Czech Republic", "Germany", "Denmark", "Dominican Republic",
+        "Ecuador", "Estonia", "Spain", "Finland", "France", "United Kingdom",
+        "Greece", "Croatia", "Hungary", "Indonesia", "Ireland", "Israel",
+        "Italy", "Jordan", "South Korea", "Kuwait", "Lithuania", "Latvia",
+        "Morocco", "Mexico", "Malaysia", "Netherlands", "New Zealand", "Oman",
+        "Panama", "Poland", "Portugal", "Qatar", "Romania", "Serbia",
+        "Saudi Arabia", "Singapore", "Slovenia", "Slovakia", "Sweden",
+        "Thailand", "Turkey", "Taiwan", "South Africa",
+    ]
+
+    CAL_COUNTRY_ISO = {
+        "United States":"US","United Arab Emirates":"AE","Austria":"AT",
+        "Australia":"AU","Belgium":"BE","Bulgaria":"BG","Canada":"CA",
+        "Switzerland":"CH","Chile":"CL","Colombia":"CO","Costa Rica":"CR",
+        "Czech Republic":"CZ","Germany":"DE","Denmark":"DK",
+        "Dominican Republic":"DO","Ecuador":"EC","Estonia":"EE","Spain":"ES",
+        "Finland":"FI","France":"FR","United Kingdom":"GB","Greece":"GR",
+        "Croatia":"HR","Hungary":"HU","Indonesia":"ID","Ireland":"IE",
+        "Israel":"IL","Italy":"IT","Jordan":"JO","South Korea":"KR",
+        "Kuwait":"KW","Lithuania":"LT","Latvia":"LV","Morocco":"MA",
+        "Mexico":"MX","Malaysia":"MY","Netherlands":"NL","New Zealand":"NZ",
+        "Oman":"OM","Panama":"PA","Poland":"PL","Portugal":"PT","Qatar":"QA",
+        "Romania":"RO","Serbia":"RS","Saudi Arabia":"SA","Singapore":"SG",
+        "Slovenia":"SI","Slovakia":"SK","Sweden":"SE","Thailand":"TH",
+        "Turkey":"TR","Taiwan":"TW","South Africa":"ZA",
+    }
+
+    CAL_COUNTRY_FLAG = {
+        "United States":"🇺🇸","United Arab Emirates":"🇦🇪","Austria":"🇦🇹",
+        "Australia":"🇦🇺","Belgium":"🇧🇪","Bulgaria":"🇧🇬","Canada":"🇨🇦",
+        "Switzerland":"🇨🇭","Chile":"🇨🇱","Colombia":"🇨🇴","Costa Rica":"🇨🇷",
+        "Czech Republic":"🇨🇿","Germany":"🇩🇪","Denmark":"🇩🇰",
+        "Dominican Republic":"🇩🇴","Ecuador":"🇪🇨","Estonia":"🇪🇪",
+        "Spain":"🇪🇸","Finland":"🇫🇮","France":"🇫🇷","United Kingdom":"🇬🇧",
+        "Greece":"🇬🇷","Croatia":"🇭🇷","Hungary":"🇭🇺","Indonesia":"🇮🇩",
+        "Ireland":"🇮🇪","Israel":"🇮🇱","Italy":"🇮🇹","Jordan":"🇯🇴",
+        "South Korea":"🇰🇷","Kuwait":"🇰🇼","Lithuania":"🇱🇹","Latvia":"🇱🇻",
+        "Morocco":"🇲🇦","Mexico":"🇲🇽","Malaysia":"🇲🇾","Netherlands":"🇳🇱",
+        "New Zealand":"🇳🇿","Oman":"🇴🇲","Panama":"🇵🇦","Poland":"🇵🇱",
+        "Portugal":"🇵🇹","Qatar":"🇶🇦","Romania":"🇷🇴","Serbia":"🇷🇸",
+        "Saudi Arabia":"🇸🇦","Singapore":"🇸🇬","Slovenia":"🇸🇮","Slovakia":"🇸🇰",
+        "Sweden":"🇸🇪","Thailand":"🇹🇭","Turkey":"🇹🇷","Taiwan":"🇹🇼",
+        "South Africa":"🇿🇦",
+    }
+
+    # Color palette for events
+    EVENT_COLORS = {
+        "🟥 Red":     "#E05252",
+        "🟧 Orange":  "#F0A500",
+        "🟨 Yellow":  "#F5D000",
+        "🟩 Green":   "#4CAF72",
+        "🟦 Blue":    "#4A90D9",
+        "🟪 Purple":  "#9B6DD8",
+        "⬜ Beige":   "#DDD5CC",
+        "⬛ Dark":    "#3B2F25",
+    }
+
+    # ── Helper: load holidays into calendar events ────────────────────────────
+    def load_country_holidays_to_cal(country: str, year: int) -> list[dict]:
+        """Fetch all public holidays for a country/year and return as event dicts."""
+        import holidays as hol_lib2
+        iso2 = CAL_COUNTRY_ISO.get(country)
+        if not iso2:
+            return []
+        try:
+            h = hol_lib2.country_holidays(iso2, years=year)
+            try:
+                if "en_US" in h.supported_languages:
+                    h = hol_lib2.country_holidays(iso2, years=year, language="en_US")
+            except Exception:
+                pass
+            flag = CAL_COUNTRY_FLAG.get(country, "")
+            color = "#4A90D9"  # default blue for auto-loaded holidays
+            events = []
+            for d, name in sorted(h.items()):
+                events.append({
+                    "date":    d.isoformat(),
+                    "name":    name,
+                    "country": country,
+                    "flag":    flag,
+                    "color":   color,
+                    "source":  "auto",
+                })
+            return events
+        except Exception:
+            return []
+
+    # ── Sidebar controls ──────────────────────────────────────────────────────
+    now_cal = datetime.now(pytz.utc)
+    cal_ctrl1, cal_ctrl2 = st.columns([5, 3])
+
+    with cal_ctrl2:
+        st.markdown("### ➕ Add Event")
+        with st.form("add_event_form", clear_on_submit=True):
+            ev_country = st.selectbox("Country", CAL_COUNTRIES, key="ev_country")
+            ev_name    = st.text_input("Event name", placeholder="e.g. Black Friday, Campaign Launch")
+            ev_date    = st.date_input("Date", value=now_cal.date())
+            ev_color_lbl = st.selectbox("Color", list(EVENT_COLORS.keys()))
+            ev_color   = EVENT_COLORS[ev_color_lbl]
+            submitted  = st.form_submit_button("Add to Calendar", use_container_width=True)
+            if submitted and ev_name:
+                st.session_state["cal_events"].append({
+                    "date":    ev_date.isoformat(),
+                    "name":    ev_name,
+                    "country": ev_country,
+                    "flag":    CAL_COUNTRY_FLAG.get(ev_country, ""),
+                    "color":   ev_color,
+                    "source":  "manual",
+                })
+                st.success(f"Added: {ev_name} on {ev_date}")
+
+        st.markdown("---")
+        st.markdown("### 🗺️ Load Public Holidays")
+        with st.form("load_holidays_form", clear_on_submit=True):
+            hl_country = st.selectbox("Country", CAL_COUNTRIES, key="hl_country")
+            hl_year    = st.selectbox("Year", [now_cal.year, now_cal.year + 1], key="hl_year")
+            load_btn   = st.form_submit_button("Load All Holidays", use_container_width=True)
+            if load_btn:
+                new_events = load_country_holidays_to_cal(hl_country, hl_year)
+                # Remove existing auto-events for same country+year to avoid duplicates
+                st.session_state["cal_events"] = [
+                    e for e in st.session_state["cal_events"]
+                    if not (e["country"] == hl_country
+                            and e["source"] == "auto"
+                            and e["date"].startswith(str(hl_year)))
+                ]
+                st.session_state["cal_events"].extend(new_events)
+                st.success(f"Loaded {len(new_events)} holidays for {hl_country} {hl_year}")
+
+        st.markdown("---")
+        # Country filter for calendar view
+        all_cal_countries = sorted(set(e["country"] for e in st.session_state["cal_events"]))
+        if all_cal_countries:
+            cal_filter_countries = st.multiselect(
+                "Show countries", all_cal_countries, default=all_cal_countries,
+                label_visibility="visible"
+            )
+        else:
+            cal_filter_countries = []
+
+        # Clear buttons
+        ccol1, ccol2 = st.columns(2)
+        with ccol1:
+            if st.button("🗑️ Clear Manual", use_container_width=True):
+                st.session_state["cal_events"] = [
+                    e for e in st.session_state["cal_events"] if e["source"] != "manual"
+                ]
+                st.rerun()
+        with ccol2:
+            if st.button("🗑️ Clear All", use_container_width=True):
+                st.session_state["cal_events"] = []
+                st.rerun()
+
+    # ── Main calendar view ────────────────────────────────────────────────────
+    with cal_ctrl1:
+        # Month navigation
+        if "cal_year"  not in st.session_state: st.session_state["cal_year"]  = now_cal.year
+        if "cal_month" not in st.session_state: st.session_state["cal_month"] = now_cal.month
+
+        nav1, nav2, nav3, nav4 = st.columns([1, 2, 2, 1])
+        with nav1:
+            if st.button("◀", key="prev_month"):
+                if st.session_state["cal_month"] == 1:
+                    st.session_state["cal_month"] = 12
+                    st.session_state["cal_year"] -= 1
+                else:
+                    st.session_state["cal_month"] -= 1
+                st.rerun()
+        with nav2:
+            import calendar as cal_lib
+            month_name = cal_lib.month_name[st.session_state["cal_month"]]
+            st.markdown(
+                f"<div style='font-size:1.3rem;font-weight:700;color:#3B2F25;padding-top:0.3rem'>"
+                f"{month_name} {st.session_state['cal_year']}</div>",
+                unsafe_allow_html=True
+            )
+        with nav3:
+            if st.button("Today", key="today_btn"):
+                st.session_state["cal_year"]  = now_cal.year
+                st.session_state["cal_month"] = now_cal.month
+                st.rerun()
+        with nav4:
+            if st.button("▶", key="next_month"):
+                if st.session_state["cal_month"] == 12:
+                    st.session_state["cal_month"] = 1
+                    st.session_state["cal_year"] += 1
+                else:
+                    st.session_state["cal_month"] += 1
+                st.rerun()
+
+        # Build event lookup: {date_str: [event, ...]}
+        active_events = [
+            e for e in st.session_state["cal_events"]
+            if (not cal_filter_countries) or (e["country"] in cal_filter_countries)
+        ]
+        event_map: dict[str, list] = {}
+        for ev in active_events:
+            event_map.setdefault(ev["date"], []).append(ev)
+
+        # Build calendar grid
+        view_year  = st.session_state["cal_year"]
+        view_month = st.session_state["cal_month"]
+        today_date = now_cal.date()
+
+        # Day headers
+        day_headers = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        header_cols = st.columns(7)
+        for i, dh in enumerate(day_headers):
+            with header_cols[i]:
+                color = "#E05252" if dh in ("Sat", "Sun") else "#8B7355"
+                st.markdown(
+                    f"<div style='text-align:center;font-size:0.72rem;font-weight:700;"
+                    f"letter-spacing:0.06em;text-transform:uppercase;color:{color};"
+                    f"padding-bottom:0.4rem;border-bottom:2px solid #DDD5CC'>{dh}</div>",
+                    unsafe_allow_html=True
+                )
+
+        # Get month calendar matrix (Mon-start)
+        cal_matrix = cal_lib.monthcalendar(view_year, view_month)
+
+        for week in cal_matrix:
+            week_cols = st.columns(7)
+            for col_i, day_num in enumerate(week):
+                with week_cols[col_i]:
+                    if day_num == 0:
+                        st.markdown(
+                            "<div style='min-height:90px;background:#F7F3EE;border-radius:10px;margin:2px'></div>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        cell_date = date(view_year, view_month, day_num)
+                        date_str  = cell_date.isoformat()
+                        is_today  = (cell_date == today_date)
+                        is_weekend = col_i >= 5
+
+                        day_events = event_map.get(date_str, [])
+
+                        # Build event pills HTML (max 3 shown, +N if more)
+                        ev_html = ""
+                        for ev in day_events[:3]:
+                            c = ev["color"]
+                            flag = ev.get("flag", "")
+                            name_short = ev["name"][:18] + ("…" if len(ev["name"]) > 18 else "")
+                            ev_html += (
+                                f"<div style='background:{c};color:white;border-radius:5px;"
+                                f"padding:1px 5px;font-size:0.62rem;font-weight:600;"
+                                f"margin-top:2px;white-space:nowrap;overflow:hidden;"
+                                f"text-overflow:ellipsis' title='{ev["name"]} — {ev["country"]}'>"
+                                f"{flag} {name_short}</div>"
+                            )
+                        if len(day_events) > 3:
+                            ev_html += f"<div style='font-size:0.6rem;color:#8B7355;margin-top:2px'>+{len(day_events)-3} more</div>"
+
+                        # Cell styling
+                        bg    = "#3B2F25" if is_today else ("#FFF8F8" if is_weekend else "#F0EAE1")
+                        num_c = "white"   if is_today else ("#E05252" if is_weekend else "#3B2F25")
+                        border = "2px solid #3B2F25" if is_today else "1px solid #DDD5CC"
+
+                        st.markdown(
+                            f"<div style='min-height:90px;background:{bg};border:{border};"
+                            f"border-radius:10px;padding:6px 7px;margin:2px'>"
+                            f"<div style='font-size:0.82rem;font-weight:700;color:{num_c}'>{day_num}</div>"
+                            f"{ev_html}"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
+
+        # ── Event list below calendar ─────────────────────────────────────────
+        if active_events:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown(
+                f"<p class='section-header'>📋 All Events This View ({view_month}/{view_year})</p>",
+                unsafe_allow_html=True
+            )
+            month_events = sorted(
+                [e for e in active_events if e["date"].startswith(f"{view_year}-{view_month:02d}")],
+                key=lambda x: x["date"]
+            )
+            if month_events:
+                for ev in month_events:
+                    ev_date_fmt = datetime.strptime(ev["date"], "%Y-%m-%d").strftime("%a %b %d")
+                    flag = ev.get("flag", "")
+                    dot = f"<span style='display:inline-block;width:10px;height:10px;background:{ev['color']};border-radius:50%;margin-right:6px'></span>"
+                    src_badge = "<span style='background:#EAE4DC;font-size:0.62rem;padding:1px 6px;border-radius:8px;color:#8B7355'>auto</span>" if ev["source"] == "auto" else "<span style='background:#D6F0E0;font-size:0.62rem;padding:1px 6px;border-radius:8px;color:#2A7A4B'>manual</span>"
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:0.5rem;padding:0.35rem 0.6rem;"
+                        f"border-bottom:1px solid #EDE6DC;font-size:0.82rem'>"
+                        f"{dot}<b style='color:#3B2F25;min-width:90px'>{ev_date_fmt}</b>"
+                        f"<span>{flag} {ev['country']}</span>"
+                        f"<span style='color:#3B2F25;flex:1'>{ev['name']}</span>"
+                        f"{src_badge}</div>",
+                        unsafe_allow_html=True
+                    )
+            else:
+                st.caption("No events this month.")
 
 
 # ─────────────────────────────────────────────

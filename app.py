@@ -2187,19 +2187,21 @@ with main_tab6:
         except Exception:
             return []
 
-    # ── Sidebar controls ──────────────────────────────────────────────────────
+    # ── Controls ──────────────────────────────────────────────────────────────
     now_cal = datetime.now(pytz.utc)
     cal_ctrl1, cal_ctrl2 = st.columns([5, 3])
 
     with cal_ctrl2:
+
+        # ── 1. ADD MANUAL EVENT ───────────────────────────────────────────────
         st.markdown("### ➕ Add Event")
         with st.form("add_event_form", clear_on_submit=True):
-            ev_country = st.selectbox("Country", CAL_COUNTRIES, key="ev_country")
-            ev_name    = st.text_input("Event name", placeholder="e.g. Black Friday, Campaign Launch")
-            ev_date    = st.date_input("Date", value=now_cal.date())
+            ev_country   = st.selectbox("Country", CAL_COUNTRIES, key="ev_country")
+            ev_name      = st.text_input("Event name", placeholder="e.g. Black Friday, Campaign Launch")
+            ev_date      = st.date_input("Date", value=now_cal.date())
             ev_color_lbl = st.selectbox("Color", list(EVENT_COLORS.keys()))
-            ev_color   = EVENT_COLORS[ev_color_lbl]
-            submitted  = st.form_submit_button("Add to Calendar", use_container_width=True)
+            ev_color     = EVENT_COLORS[ev_color_lbl]
+            submitted    = st.form_submit_button("Add to Calendar", use_container_width=True)
             if submitted and ev_name:
                 _db_add_event({
                     "date":    ev_date.isoformat(),
@@ -2213,48 +2215,110 @@ with main_tab6:
                 st.success(f"✅ Saved: {ev_name} on {ev_date}")
 
         st.markdown("---")
+
+        # ── 2. LOAD PUBLIC HOLIDAYS — checkboxes, no dropdown ─────────────────
         st.markdown("### 🗺️ Load Public Holidays")
-        with st.form("load_holidays_form", clear_on_submit=True):
-            hl_country = st.selectbox("Country", CAL_COUNTRIES, key="hl_country")
-            hl_year    = st.selectbox("Year", [now_cal.year, now_cal.year + 1], key="hl_year")
-            load_btn   = st.form_submit_button("Load All Holidays", use_container_width=True)
-            if load_btn:
-                new_events = load_country_holidays_to_cal(hl_country, hl_year)
-                # Remove existing auto-events for same country+year to avoid duplicates
-                _db_delete_where(
-                    "country=? AND source='auto' AND date LIKE ?",
-                    (hl_country, f"{hl_year}%")
+        hl_year = st.selectbox(
+            "Year", [now_cal.year, now_cal.year + 1],
+            key="hl_year_select",
+            label_visibility="visible"
+        )
+
+        # Which countries already have auto-holidays loaded for this year?
+        already_loaded = set(
+            e["country"] for e in st.session_state["cal_events"]
+            if e["source"] == "auto" and e["date"].startswith(str(hl_year))
+        )
+
+        st.caption("Check to load · Uncheck to remove from calendar (data stays in DB)")
+
+        # Scroll container for the country checklist
+        checkbox_container = st.container(height=260)
+        with checkbox_container:
+            for country in CAL_COUNTRIES:
+                is_checked = country in already_loaded
+                new_state  = st.checkbox(
+                    f"{CAL_COUNTRY_FLAG.get(country, '')} {country}",
+                    value=is_checked,
+                    key=f"hl_chk_{country}_{hl_year}"
                 )
-                for ev in new_events:
-                    _db_add_event(ev)
-                st.session_state["cal_events"] = _db_load_events()
-                st.success(f"✅ Saved {len(new_events)} holidays for {hl_country} {hl_year}")
+                if new_state and not is_checked:
+                    # User just checked → load holidays into DB
+                    new_events = load_country_holidays_to_cal(country, hl_year)
+                    _db_delete_where(
+                        "country=? AND source='auto' AND date LIKE ?",
+                        (country, f"{hl_year}%")
+                    )
+                    for ev in new_events:
+                        _db_add_event(ev)
+                    st.session_state["cal_events"] = _db_load_events()
+                    st.rerun()
+                elif not new_state and is_checked:
+                    # User just unchecked → remove from DB (but seeded events stay)
+                    _db_delete_where(
+                        "country=? AND source='auto' AND date LIKE ?",
+                        (country, f"{hl_year}%")
+                    )
+                    st.session_state["cal_events"] = _db_load_events()
+                    st.rerun()
 
         st.markdown("---")
-        # Country filter for calendar view
-        all_cal_countries = sorted(set(e["country"] for e in st.session_state["cal_events"]))
-        if all_cal_countries:
-            cal_filter_countries = st.multiselect(
-                "Show countries / platforms", all_cal_countries,
-                default=all_cal_countries,   # all shown by default
-                label_visibility="visible",
-                help="All events are visible by default. Deselect to hide specific categories."
-            )
-        else:
-            cal_filter_countries = []
 
-        # Clear buttons
-        ccol1, ccol2 = st.columns(2)
-        with ccol1:
-            if st.button("🗑️ Clear Manual", use_container_width=True):
-                _db_delete_where("source='manual'")
-                st.session_state["cal_events"] = _db_load_events()
-                st.rerun()
-        with ccol2:
-            if st.button("🗑️ Clear All", use_container_width=True):
-                _db_clear_all()
-                st.session_state["cal_events"] = []
-                st.rerun()
+        # ── 3. VISIBILITY FILTER — hide/show without deleting ─────────────────
+        # Uses session state so nothing is ever deleted from the DB
+        all_cal_countries = sorted(set(e["country"] for e in st.session_state["cal_events"]))
+
+        if "cal_hidden" not in st.session_state:
+            st.session_state["cal_hidden"] = set()   # set of hidden country/platform names
+
+        st.markdown("### 👁️ Show / Hide")
+        st.caption("Toggle visibility. Events are never deleted.")
+
+        if all_cal_countries:
+            # Quick actions
+            qc1, qc2 = st.columns(2)
+            with qc1:
+                if st.button("Show All", use_container_width=True, key="show_all_btn"):
+                    st.session_state["cal_hidden"] = set()
+                    st.rerun()
+            with qc2:
+                if st.button("Hide All", use_container_width=True, key="hide_all_btn"):
+                    st.session_state["cal_hidden"] = set(all_cal_countries)
+                    st.rerun()
+
+            vis_container = st.container(height=180)
+            with vis_container:
+                for country in all_cal_countries:
+                    currently_hidden = country in st.session_state["cal_hidden"]
+                    visible = st.checkbox(
+                        country,
+                        value=not currently_hidden,
+                        key=f"vis_{country}"
+                    )
+                    if visible and currently_hidden:
+                        st.session_state["cal_hidden"].discard(country)
+                        st.rerun()
+                    elif not visible and not currently_hidden:
+                        st.session_state["cal_hidden"].add(country)
+                        st.rerun()
+        else:
+            st.caption("No events loaded yet.")
+
+        # cal_filter_countries = what's actually visible
+        cal_filter_countries = [
+            c for c in all_cal_countries
+            if c not in st.session_state.get("cal_hidden", set())
+        ]
+
+        st.markdown("---")
+
+        # ── 4. DELETE MANUAL EVENTS ONLY ──────────────────────────────────────
+        st.markdown("### 🗑️ Delete")
+        st.caption("Only manually added events can be deleted.")
+        if st.button("Delete all manual events", use_container_width=True, key="del_manual_btn"):
+            _db_delete_where("source='manual'")
+            st.session_state["cal_events"] = _db_load_events()
+            st.rerun()
 
     # ── Main calendar view ────────────────────────────────────────────────────
     with cal_ctrl1:
@@ -2296,8 +2360,8 @@ with main_tab6:
         # Build event lookup: {date_str: [event, ...]}
         active_events = [
             e for e in st.session_state["cal_events"]
-            if (not cal_filter_countries) or (e["country"] in cal_filter_countries)
-        ]
+            if e["country"] in cal_filter_countries
+        ] if cal_filter_countries else st.session_state["cal_events"]
         event_map: dict[str, list] = {}
         for ev in active_events:
             event_map.setdefault(ev["date"], []).append(ev)

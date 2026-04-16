@@ -2259,15 +2259,23 @@ with main_tab6:
                     edit_color_lbl = st.selectbox("Color", color_keys, index=cur_ci)
                     edit_color = EVENT_COLORS[edit_color_lbl]
                     save_edit  = st.form_submit_button("Save Changes", use_container_width=True)
-                    cancel_btn = st.form_submit_button("Cancel", use_container_width=True)
+                    ef_c1, ef_c2 = st.columns(2)
+                    with ef_c1:
+                        cancel_btn = st.form_submit_button("Cancel", use_container_width=True)
+                    with ef_c2:
+                        delete_btn = st.form_submit_button("🗑️ Delete Event", use_container_width=True)
                     if save_edit and edit_name:
-                        import sqlite3 as _sq2
                         conn2 = _db_connect()
                         conn2.execute(
                             "UPDATE events SET name=?, date=?, color=? WHERE id=?",
                             (edit_name, edit_date.isoformat(), edit_color, eid)
                         )
                         conn2.commit(); conn2.close()
+                        st.session_state["cal_events"] = _db_load_events()
+                        st.session_state["editing_event_id"] = None
+                        st.rerun()
+                    if delete_btn:
+                        _db_delete_where("id=?", (eid,))
                         st.session_state["cal_events"] = _db_load_events()
                         st.session_state["editing_event_id"] = None
                         st.rerun()
@@ -2479,16 +2487,9 @@ with main_tab6:
                         )
                     with row_r:
                         if ev["source"] == "manual":
-                            # Edit button
-                            if st.button("✏️", key=f"edit_{ev['id']}", help="Edit event",
+                            if st.button("✏️", key=f"edit_{ev['id']}", help="Edit / Delete event",
                                          use_container_width=True):
                                 st.session_state["editing_event_id"] = ev["id"]
-                                st.rerun()
-                            # Delete button
-                            if st.button("🗑", key=f"del_{ev['id']}", help="Delete event",
-                                         use_container_width=True):
-                                _db_delete_where("id=?", (ev["id"],))
-                                st.session_state["cal_events"] = _db_load_events()
                                 st.rerun()
             else:
                 st.caption("No events this month.")
